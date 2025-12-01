@@ -89,12 +89,10 @@ done
 MOUNTS+=("-v" "$(pwd):$(pwd)")
 
 # Run av1an in Docker
-# --security-opt seccomp=unconfined: fixes sysctl permission errors
-# --privileged may be needed on some systems for hardware access
+# --privileged: required for Docker-in-LXC (nested containers)
 exec docker run --rm \
-    --security-opt seccomp=unconfined \
+    --privileged \
     "${MOUNTS[@]}" \
     -w "$(pwd)" \
-    --user "$(id -u):$(id -g)" \
     "${IMAGE}" \
     "${AV1AN_ARGS[@]}"
