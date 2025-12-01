@@ -55,8 +55,8 @@ async fn main() -> ExitCode {
             );
             println!("Starting metrics server on http://127.0.0.1:7878/metrics");
 
-            // Run the daemon with the metrics server
-            if let Err(e) = daemon.run_with_server().await {
+            // Run the daemon with the metrics server and scanning
+            if let Err(e) = daemon.run_with_scanning().await {
                 eprintln!("Daemon error: {}", e);
                 return ExitCode::FAILURE;
             }

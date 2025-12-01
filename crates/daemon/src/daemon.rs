@@ -471,14 +471,19 @@ impl Daemon {
 
         tokio::spawn(async move {
             loop {
+                println!("Starting scan cycle...");
+                
                 // Load existing jobs
                 let existing_jobs = load_jobs(&job_state_dir).unwrap_or_else(|e| {
                     eprintln!("Warning: Failed to load existing jobs: {}", e);
                     Vec::new()
                 });
+                println!("Loaded {} existing jobs", existing_jobs.len());
 
                 // Scan libraries
+                println!("Scanning {} library roots: {:?}", config.scan.library_roots.len(), config.scan.library_roots);
                 let candidates = scan_libraries(&config.scan.library_roots);
+                println!("Found {} video candidates", candidates.len());
 
                 // Create gates config
                 let gates_config = DaemonGatesConfig {
@@ -566,6 +571,7 @@ impl Daemon {
 
                             // Queue job
                             if job_tx.send(executor_job).await.is_ok() {
+                                println!("Queued job {} for encoding: {:?}", managed_job.id, managed_job.input_path);
                                 let mut m = metrics.write().await;
                                 m.queue_len += 1;
                             }
@@ -573,6 +579,7 @@ impl Daemon {
                     }
                 }
 
+                println!("Scan cycle complete. Waiting {} seconds before next scan.", config.scan.scan_interval_secs);
                 // Wait before next scan cycle
                 tokio::time::sleep(Duration::from_secs(config.scan.scan_interval_secs)).await;
             }
