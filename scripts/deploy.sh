@@ -214,6 +214,7 @@ After=network.target
 
 [Service]
 Type=simple
+Environment="PYTHONPATH=/usr/local/lib/python3.13/site-packages"
 ExecStart=/usr/local/bin/av1-super-daemon --config /etc/av1-super-daemon/config.toml --temp-dir /var/lib/av1-super-daemon/chunks
 Restart=on-failure
 RestartSec=5
