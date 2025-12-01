@@ -182,7 +182,8 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/av1-super-daemon --config /etc/av1-super-daemon/config.toml --temp-dir /var/lib/av1-super-daemon/chunks
+# Use --skip-checks if av1an is not installed yet
+ExecStart=/usr/local/bin/av1-super-daemon --config /etc/av1-super-daemon/config.toml --temp-dir /var/lib/av1-super-daemon/chunks --skip-checks
 Restart=on-failure
 RestartSec=5
 StandardOutput=journal
@@ -228,6 +229,20 @@ show_status() {
     echo ""
     echo "Service status:"
     systemctl status av1-super-daemon --no-pager || true
+    echo ""
+    
+    # Quick test of metrics endpoint
+    echo "Testing metrics endpoint..."
+    sleep 1
+    if curl -s http://127.0.0.1:7878/metrics > /dev/null 2>&1; then
+        log_info "Metrics endpoint is responding!"
+        echo "Sample metrics:"
+        curl -s http://127.0.0.1:7878/metrics | head -c 200
+        echo "..."
+    else
+        log_warn "Metrics endpoint not responding yet"
+    fi
+    
     echo ""
     echo "Useful commands:"
     echo "  View logs:     journalctl -u av1-super-daemon -f"
