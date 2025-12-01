@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+#
+# ffprobe Docker wrapper
+# Runs ffprobe via masterofzen/av1an:master container
+#
+
+set -eo pipefail
+
+IMAGE="masterofzen/av1an:master"
+
+# For simple commands like -version, run without mounts
+if [[ $# -eq 0 ]] || [[ "$1" == "-version" ]] || [[ "$1" == "-help" ]] || [[ "$1" == "-h" ]]; then
+    exec docker run --rm --privileged --entrypoint ffprobe "${IMAGE}" "$@"
+fi
+
+# For probing files, we need to mount the file's directory
+# Find any file paths in arguments and mount their parent directories
+MOUNTS=()
+ARGS=()
+
+for arg in "$@"; do
+    if [[ -e "$arg" ]] || [[ "$arg" == /* ]]; then
+        # This looks like a file path - mount its parent directory
+        if [[ "$arg" == /* ]]; then
+            dir=$(dirname "$arg")
+        else
+            dir=$(dirname "$(pwd)/$arg")
+        fi
+        MOUNTS+=("-v" "${dir}:${dir}:ro")
+    fi
+    ARGS+=("$arg")
+done
+
+# Also mount current working directory
+MOUNTS+=("-v" "$(pwd):$(pwd):ro")
+
+exec docker run --rm \
+    --privileged \
+    --entrypoint ffprobe \
+    "${MOUNTS[@]}" \
+    -w "$(pwd)" \
+    "${IMAGE}" \
+    "${ARGS[@]}"
