@@ -49,7 +49,7 @@ echo "av1an version:"
 /usr/local/bin/av1an --version 2>&1 | head -5 || echo "    (version check may require a video file)"
 echo ""
 echo "ffmpeg version (inside container):"
-docker run --rm masterofzen/av1an:master ffmpeg -version 2>&1 | head -1
+docker run --rm --security-opt seccomp=unconfined masterofzen/av1an:master ffmpeg -version 2>&1 | head -1
 
 echo ""
 echo "=============================================="

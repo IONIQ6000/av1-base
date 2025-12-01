@@ -11,7 +11,6 @@ set -euo pipefail
 IMAGE="masterofzen/av1an:master"
 
 # Parse arguments to find -i, -o, and --temp paths that need mounting
-DOCKER_ARGS=()
 AV1AN_ARGS=()
 MOUNTS=()
 
@@ -90,7 +89,10 @@ done
 MOUNTS+=("-v" "$(pwd):$(pwd)")
 
 # Run av1an in Docker
+# --security-opt seccomp=unconfined: fixes sysctl permission errors
+# --privileged may be needed on some systems for hardware access
 exec docker run --rm \
+    --security-opt seccomp=unconfined \
     "${MOUNTS[@]}" \
     -w "$(pwd)" \
     --user "$(id -u):$(id -g)" \
