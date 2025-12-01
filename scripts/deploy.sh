@@ -95,10 +95,6 @@ stop_service() {
 pull_latest() {
     log_info "Pulling latest code from git..."
     
-    # Get the directory where this script is located
-    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
-    
     cd "$PROJECT_DIR"
     
     # Stash any local changes
@@ -119,9 +115,6 @@ pull_latest() {
 build_app() {
     log_info "Building application in release mode..."
     
-    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
-    
     cd "$PROJECT_DIR"
     
     # Ensure cargo is in PATH
@@ -137,9 +130,6 @@ build_app() {
 # Install binaries
 install_binaries() {
     log_info "Installing binaries to /usr/local/bin..."
-    
-    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
     
     cp "$PROJECT_DIR/target/release/av1-super-daemon" /usr/local/bin/
     cp "$PROJECT_DIR/target/release/av1-dashboard" /usr/local/bin/
@@ -251,6 +241,12 @@ show_status() {
 # Main
 main() {
     check_root
+    
+    # Get the directory where this script is located - set globally
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+    
+    log_info "Project directory: $PROJECT_DIR"
     
     # Parse arguments
     INSTALL_DEPS=false
