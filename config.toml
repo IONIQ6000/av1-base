@@ -1,0 +1,10 @@
+[cpu]
+logical_cores = 10
+target_cpu_utilization = 0.85
+
+[av1an]
+workers_per_job = 4
+max_concurrent_jobs = 1
+
+[encoder_safety]
+disallow_hardware_encoding = true

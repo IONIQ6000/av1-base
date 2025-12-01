@@ -1,0 +1,201 @@
+# Implementation Plan
+
+- [x] 1. Set up project structure and dependencies
+  - [x] 1.1 Create workspace structure with crates for config, daemon, and tui
+    - Create `crates/config/Cargo.toml` and `crates/config/src/lib.rs`
+    - Create `crates/daemon/Cargo.toml` and `crates/daemon/src/lib.rs`
+    - Create `crates/tui/Cargo.toml` and `crates/tui/src/main.rs`
+    - Update root `Cargo.toml` to include workspace members
+    - _Requirements: 1.1, 8.1_
+  - [x] 1.2 Add dependencies to each crate
+    - config: `serde`, `toml`
+    - daemon: `tokio`, `serde`, `serde_json`, `sysinfo`, `axum`, `num_cpus`, `thiserror`
+    - tui: `ratatui`, `crossterm`, `serde`, `serde_json`, `tokio`, `reqwest`
+    - Add `proptest` as dev-dependency for property testing
+    - _Requirements: 7.1, 6.1_
+
+- [x] 2. Implement configuration module
+  - [x] 2.1 Create configuration structs
+    - Implement `CpuConfig`, `Av1anConfig`, `EncoderSafetyConfig`, `Config`
+    - Add serde derive macros and default functions
+    - _Requirements: 8.1_
+  - [x] 2.2 Implement config loading from TOML
+    - Parse `config.toml` file
+    - Handle missing optional fields with defaults
+    - _Requirements: 8.1_
+  - [x] 2.3 Implement environment variable overrides
+    - Override `logical_cores`, `target_cpu_utilization`, `workers_per_job`, `max_concurrent_jobs`, `disallow_hardware_encoding`
+    - _Requirements: 8.2, 8.3, 8.4, 8.5, 8.6_
+  - [x] 2.4 Write property test for config parsing and env override
+    - **Property 8: Configuration Parsing and Environment Override**
+    - **Validates: Requirements 8.1, 8.2, 8.3, 8.4, 8.5, 8.6**
+
+- [x] 3. Implement concurrency planning module
+  - [x] 3.1 Create ConcurrencyPlan struct and derive_plan function
+    - Implement core count detection via `num_cpus`
+    - Implement worker derivation logic (8 for 32+ cores, 4 otherwise)
+    - Implement max_concurrent_jobs derivation (1 for 24+ cores, 2 otherwise)
+    - _Requirements: 1.1, 1.2, 1.3_
+  - [x] 3.2 Implement explicit config override handling
+    - Use explicit values when non-zero
+    - _Requirements: 1.4_
+  - [x] 3.3 Implement utilization clamping
+    - Clamp target_cpu_utilization to [0.5, 1.0]
+    - _Requirements: 1.5_
+  - [x] 3.4 Write property test for concurrency derivation
+    - **Property 1: Concurrency Plan Derivation**
+    - **Validates: Requirements 1.1, 1.2, 1.3**
+  - [x] 3.5 Write property test for explicit config override
+    - **Property 2: Explicit Configuration Override**
+    - **Validates: Requirements 1.4**
+  - [x] 3.6 Write property test for utilization clamping
+    - **Property 3: Utilization Clamping**
+    - **Validates: Requirements 1.5**
+
+- [x] 4. Implement startup checks module
+  - [x] 4.1 Implement software-only assertion
+    - Check for forbidden hardware flags: nvenc, qsv, vaapi, cuda, amf, vce, qsvenc
+    - Return error if detected and disallow_hardware_encoding is true
+    - _Requirements: 3.1, 3.2_
+  - [x] 4.2 Implement Av1an availability check
+    - Run `av1an --version` and verify success
+    - _Requirements: 4.1, 4.2_
+  - [x] 4.3 Implement FFmpeg version check
+    - Parse `ffmpeg -version` output
+    - Handle n-prefixed versions (e.g., n8.0-...)
+    - Require major version >= 8
+    - _Requirements: 4.3, 4.4, 4.5_
+  - [x] 4.4 Write property test for hardware flag detection
+    - **Property 5: Hardware Flag Detection**
+    - **Validates: Requirements 3.1, 3.2**
+  - [x] 4.5 Write property test for FFmpeg version parsing
+    - **Property 6: FFmpeg Version Parsing**
+    - **Validates: Requirements 4.5**
+
+- [x] 5. Checkpoint - Ensure all tests pass
+  - Ensure all tests pass, ask the user if questions arise.
+
+- [x] 6. Implement Av1an encoder module
+  - [x] 6.1 Create Av1anEncodeParams struct
+    - Fields: input_path, output_path, temp_chunks_dir, concurrency
+    - _Requirements: 5.1, 10.1, 10.2, 10.11_
+  - [x] 6.2 Implement build_av1an_command function
+    - Build Command with all required flags
+    - Include fixed encoding settings: svt-av1, yuv420p10le, crf 8, preset 3
+    - Include svt-params for film-grain tuning
+    - Include target-quality 1, audio-copy
+    - Use workers from concurrency plan
+    - _Requirements: 2.1, 2.2, 2.3, 2.4, 2.5, 2.6, 2.7, 10.1-10.11_
+  - [x] 6.3 Implement run_av1an function
+    - Execute command and handle exit status
+    - Return error on non-zero exit
+    - _Requirements: 5.2, 5.3_
+  - [x] 6.4 Write property test for command completeness
+    - **Property 4: Av1an Command Completeness**
+    - **Validates: Requirements 2.1-2.7, 10.1-10.11**
+
+- [x] 7. Implement metrics module
+  - [x] 7.1 Create metrics structs
+    - Implement JobMetrics, SystemMetrics, MetricsSnapshot
+    - Add serde derive macros for JSON serialization
+    - _Requirements: 7.3, 7.4, 7.5_
+  - [x] 7.2 Implement SharedMetrics type
+    - Create Arc<RwLock<MetricsSnapshot>> wrapper
+    - _Requirements: 7.2_
+  - [x] 7.3 Implement system metrics collection
+    - Use sysinfo crate for CPU, memory, load averages
+    - _Requirements: 7.4_
+  - [x] 7.4 Write property test for MetricsSnapshot round-trip
+    - **Property 7: MetricsSnapshot Serialization Round-Trip**
+    - **Validates: Requirements 7.2, 7.3, 7.4, 7.5**
+
+- [x] 8. Implement metrics HTTP server
+  - [x] 8.1 Create metrics server with axum
+    - Bind to 127.0.0.1:7878
+    - Implement GET /metrics endpoint
+    - Return JSON-serialized MetricsSnapshot
+    - _Requirements: 7.1, 7.2_
+  - [x] 8.2 Write unit tests for metrics endpoint
+    - Test JSON response format
+    - _Requirements: 7.2_
+
+- [x] 9. Checkpoint - Ensure all tests pass
+  - Ensure all tests pass, ask the user if questions arise.
+
+- [x] 10. Implement job executor
+  - [x] 10.1 Create JobExecutor struct
+    - Use tokio Semaphore for concurrency limiting
+    - Store concurrency plan and shared metrics
+    - _Requirements: 5.5_
+  - [x] 10.2 Implement job execution pipeline
+    - Create temp chunks directory
+    - Call run_av1an with params
+    - Update job metrics during execution
+    - Handle success/failure state transitions
+    - _Requirements: 5.1, 5.2, 5.3, 5.4_
+  - [x] 10.3 Write unit tests for job executor
+    - Test semaphore permit limiting
+    - Test state transitions
+    - _Requirements: 5.5_
+
+- [x] 11. Implement daemon startup and main loop
+  - [x] 11.1 Create daemon entry point
+    - Load config from file
+    - Apply environment overrides
+    - Run startup checks in order: software-only, av1an, ffmpeg
+    - Derive concurrency plan
+    - Initialize shared metrics
+    - _Requirements: 4.1, 4.3, 3.1_
+  - [x] 11.2 Start metrics server
+    - Spawn HTTP server task
+    - _Requirements: 7.1_
+  - [x] 11.3 Implement daemon loop
+    - Process jobs from queue
+    - Update metrics on job completion
+    - _Requirements: 5.2, 5.3, 5.4_
+
+- [x] 12. Implement TUI dashboard
+  - [x] 12.1 Create TUI app structure
+    - Initialize terminal with crossterm
+    - Create App struct with metrics state
+    - _Requirements: 6.1_
+  - [x] 12.2 Implement metrics fetching
+    - HTTP GET to http://127.0.0.1:7878/metrics
+    - Deserialize MetricsSnapshot
+    - Poll every ~500ms
+    - _Requirements: 6.1, 6.7_
+  - [x] 12.3 Implement queue table widget
+    - Display columns: ID, Stage, Progress %, FPS, Bitrate, CRF, Workers, ETA
+    - _Requirements: 6.2_
+  - [x] 12.4 Implement system gauges widget
+    - Display CPU and memory usage gauges
+    - Display load averages table
+    - _Requirements: 6.3, 6.4_
+  - [x] 12.5 Implement throughput chart widget
+    - Display MB encoded over time
+    - _Requirements: 6.5_
+  - [x] 12.6 Implement event log widget
+    - Display recent job events
+    - _Requirements: 6.6_
+  - [x] 12.7 Wire up TUI main loop
+    - Handle keyboard input (quit on 'q')
+    - Render all widgets in layout
+    - _Requirements: 6.1_
+
+- [x] 13. Create FFmpeg installer script
+  - [x] 13.1 Create scripts/install_ffmpeg8.sh
+    - Check for root privileges
+    - Remove existing distro FFmpeg
+    - Download from FFMPEG_ARCHIVE_URL
+    - Extract and install to /usr/local/bin
+    - Display installed version
+    - _Requirements: 9.1, 9.2, 9.3, 9.4, 9.5, 9.6_
+
+- [x] 14. Create CLI entry point
+  - [x] 14.1 Create cli-daemon crate
+    - Parse command line arguments (--config path)
+    - Call daemon startup
+    - _Requirements: 8.1_
+
+- [x] 15. Final Checkpoint - Ensure all tests pass
+  - Ensure all tests pass, ask the user if questions arise.

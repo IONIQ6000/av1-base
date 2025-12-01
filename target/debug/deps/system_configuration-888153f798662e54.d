@@ -1,0 +1,9 @@
+/Users/obsidian/av1-base/target/debug/deps/system_configuration-888153f798662e54.d: /Users/obsidian/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/system-configuration-0.6.1/src/lib.rs /Users/obsidian/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/system-configuration-0.6.1/src/dynamic_store.rs /Users/obsidian/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/system-configuration-0.6.1/src/network_configuration.rs /Users/obsidian/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/system-configuration-0.6.1/src/network_reachability.rs /Users/obsidian/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/system-configuration-0.6.1/src/preferences.rs
+
+/Users/obsidian/av1-base/target/debug/deps/libsystem_configuration-888153f798662e54.rmeta: /Users/obsidian/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/system-configuration-0.6.1/src/lib.rs /Users/obsidian/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/system-configuration-0.6.1/src/dynamic_store.rs /Users/obsidian/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/system-configuration-0.6.1/src/network_configuration.rs /Users/obsidian/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/system-configuration-0.6.1/src/network_reachability.rs /Users/obsidian/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/system-configuration-0.6.1/src/preferences.rs
+
+/Users/obsidian/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/system-configuration-0.6.1/src/lib.rs:
+/Users/obsidian/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/system-configuration-0.6.1/src/dynamic_store.rs:
+/Users/obsidian/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/system-configuration-0.6.1/src/network_configuration.rs:
+/Users/obsidian/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/system-configuration-0.6.1/src/network_reachability.rs:
+/Users/obsidian/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/system-configuration-0.6.1/src/preferences.rs:

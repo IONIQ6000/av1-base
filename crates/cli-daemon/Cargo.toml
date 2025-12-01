@@ -1,0 +1,15 @@
+[package]
+name = "av1-super-daemon-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "CLI entry point for AV1 Super Daemon"
+
+[[bin]]
+name = "av1-super-daemon"
+path = "src/main.rs"
+
+[dependencies]
+av1-super-daemon = { path = "../daemon" }
+clap = { version = "4", features = ["derive"] }
+tokio = { version = "1", features = ["full"] }

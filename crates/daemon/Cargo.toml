@@ -1,0 +1,19 @@
+[package]
+name = "av1-super-daemon"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+av1-super-daemon-config = { path = "../config" }
+tokio = { version = "1.0", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sysinfo = "0.31"
+axum = "0.7"
+num_cpus = "1.16"
+thiserror = "1.0"
+
+[dev-dependencies]
+proptest = "1.4"
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
