@@ -47,8 +47,14 @@ install_dependencies() {
         ninja-build \
         nasm \
         cmake \
-        libvapoursynth-dev \
-        vapoursynth
+        autoconf \
+        automake \
+        libtool \
+        cython3 \
+        python3-dev \
+        zlib1g-dev \
+        libzimg-dev \
+        svt-av1
     
     # Install Rust if not present
     if ! command -v cargo &> /dev/null; then
@@ -70,10 +76,36 @@ install_dependencies() {
         fi
     fi
     
-    # Install av1an via cargo if not present
+    # Install VapourSynth from source (not in Debian Trixie repos)
+    if [ ! -f /usr/local/lib/libvapoursynth.so ]; then
+        log_info "Building VapourSynth from source..."
+        cd /tmp
+        rm -rf vapoursynth
+        git clone --depth 1 --branch R70 https://github.com/vapoursynth/vapoursynth.git
+        cd vapoursynth
+        ./autogen.sh
+        ./configure --prefix=/usr/local
+        make -j$(nproc)
+        make install
+        ldconfig
+        # Set up Python path
+        echo 'export PYTHONPATH=/usr/local/lib/python3.13/site-packages:$PYTHONPATH' > /etc/profile.d/vapoursynth.sh
+        source /etc/profile.d/vapoursynth.sh
+        log_info "VapourSynth installed successfully"
+    else
+        log_info "VapourSynth already installed"
+    fi
+    
+    # Install av1an from source (requires VapourSynth)
     if ! command -v av1an &> /dev/null; then
-        log_info "Installing av1an..."
-        cargo install av1an
+        log_info "Building av1an from source..."
+        cd /tmp
+        rm -rf Av1an-latest
+        git clone https://github.com/master-of-zen/Av1an.git Av1an-latest
+        cd Av1an-latest
+        cargo build --release
+        cp target/release/av1an /usr/local/bin/
+        log_info "av1an installed successfully"
     else
         log_info "av1an already installed"
     fi
@@ -182,8 +214,7 @@ After=network.target
 
 [Service]
 Type=simple
-# Use --skip-checks if av1an is not installed yet
-ExecStart=/usr/local/bin/av1-super-daemon --config /etc/av1-super-daemon/config.toml --temp-dir /var/lib/av1-super-daemon/chunks --skip-checks
+ExecStart=/usr/local/bin/av1-super-daemon --config /etc/av1-super-daemon/config.toml --temp-dir /var/lib/av1-super-daemon/chunks
 Restart=on-failure
 RestartSec=5
 StandardOutput=journal
