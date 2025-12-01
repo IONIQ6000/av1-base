@@ -15,7 +15,7 @@ fi
 
 # For probing files, we need to mount the file's directory
 # Find any file paths in arguments and mount their parent directories
-MOUNTS=()
+declare -A MOUNT_DIRS
 ARGS=()
 
 for arg in "$@"; do
@@ -26,13 +26,41 @@ for arg in "$@"; do
         else
             dir=$(dirname "$(pwd)/$arg")
         fi
-        MOUNTS+=("-v" "${dir}:${dir}:ro")
+        # Skip root directory
+        if [[ "$dir" != "/" ]]; then
+            MOUNT_DIRS["$dir"]=1
+        fi
     fi
     ARGS+=("$arg")
 done
 
-# Also mount current working directory
-MOUNTS+=("-v" "$(pwd):$(pwd):ro")
+# Build mount arguments
+MOUNTS=()
+for dir in "${!MOUNT_DIRS[@]}"; do
+    MOUNTS+=("-v" "${dir}:${dir}:ro")
+done
+
+# Mount the top-level directory for files at root
+# e.g., /main-library-2 for /main-library-2/Media/...
+for arg in "$@"; do
+    if [[ "$arg" == /* ]]; then
+        top_dir=$(echo "$arg" | cut -d'/' -f2)
+        if [[ -n "$top_dir" ]] && [[ -d "/$top_dir" ]]; then
+            MOUNT_DIRS["/$top_dir"]=1
+        fi
+    fi
+done
+
+# Rebuild mounts with top-level dirs
+MOUNTS=()
+for dir in "${!MOUNT_DIRS[@]}"; do
+    MOUNTS+=("-v" "${dir}:${dir}:ro")
+done
+
+# Also mount current working directory if not root
+if [[ "$(pwd)" != "/" ]]; then
+    MOUNTS+=("-v" "$(pwd):$(pwd):ro")
+fi
 
 exec docker run --rm \
     --privileged \
