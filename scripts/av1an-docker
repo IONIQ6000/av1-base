@@ -1,0 +1,98 @@
+#!/usr/bin/env bash
+#
+# av1an Docker wrapper
+# Drop-in replacement that runs av1an via masterofzen/av1an:master
+#
+# This wrapper transparently maps paths so the daemon can call "av1an" 
+# as if it were installed locally.
+
+set -euo pipefail
+
+IMAGE="masterofzen/av1an:master"
+
+# Parse arguments to find -i, -o, and --temp paths that need mounting
+DOCKER_ARGS=()
+AV1AN_ARGS=()
+MOUNTS=()
+
+# Track directories we need to mount
+declare -A MOUNT_DIRS
+
+add_mount_dir() {
+    local path="$1"
+    local dir
+    
+    # Get absolute path
+    if [[ "${path}" == /* ]]; then
+        dir=$(dirname "${path}")
+    else
+        dir=$(dirname "$(pwd)/${path}")
+    fi
+    
+    # Normalize and add to mount set
+    dir=$(realpath -m "${dir}" 2>/dev/null || echo "${dir}")
+    MOUNT_DIRS["${dir}"]=1
+}
+
+# Process arguments
+i=1
+while [[ $i -le $# ]]; do
+    arg="${!i}"
+    
+    case "${arg}" in
+        -i|--input)
+            # Next arg is input path
+            ((i++))
+            if [[ $i -le $# ]]; then
+                input_path="${!i}"
+                add_mount_dir "${input_path}"
+                AV1AN_ARGS+=("${arg}" "${input_path}")
+            fi
+            ;;
+        -o|--output)
+            # Next arg is output path
+            ((i++))
+            if [[ $i -le $# ]]; then
+                output_path="${!i}"
+                add_mount_dir "${output_path}"
+                AV1AN_ARGS+=("${arg}" "${output_path}")
+            fi
+            ;;
+        --temp)
+            # Next arg is temp directory
+            ((i++))
+            if [[ $i -le $# ]]; then
+                temp_path="${!i}"
+                # For temp, mount the directory itself
+                if [[ "${temp_path}" == /* ]]; then
+                    MOUNT_DIRS["${temp_path}"]=1
+                else
+                    MOUNT_DIRS["$(pwd)/${temp_path}"]=1
+                fi
+                AV1AN_ARGS+=("${arg}" "${temp_path}")
+            fi
+            ;;
+        *)
+            AV1AN_ARGS+=("${arg}")
+            ;;
+    esac
+    ((i++))
+done
+
+# Build mount arguments - mount each unique directory
+for dir in "${!MOUNT_DIRS[@]}"; do
+    # Create directory if it doesn't exist (for temp/output dirs)
+    mkdir -p "${dir}" 2>/dev/null || true
+    MOUNTS+=("-v" "${dir}:${dir}")
+done
+
+# Also mount current working directory for relative paths
+MOUNTS+=("-v" "$(pwd):$(pwd)")
+
+# Run av1an in Docker
+exec docker run --rm \
+    "${MOUNTS[@]}" \
+    -w "$(pwd)" \
+    --user "$(id -u):$(id -g)" \
+    "${IMAGE}" \
+    "${AV1AN_ARGS[@]}"
