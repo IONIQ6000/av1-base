@@ -132,10 +132,10 @@ install_binaries() {
     log_info "Installing binaries to /usr/local/bin..."
     
     cp "$PROJECT_DIR/target/release/av1-super-daemon" /usr/local/bin/
-    cp "$PROJECT_DIR/target/release/av1-dashboard" /usr/local/bin/
+    cp "$PROJECT_DIR/target/release/atop" /usr/local/bin/
     
     chmod +x /usr/local/bin/av1-super-daemon
-    chmod +x /usr/local/bin/av1-dashboard
+    chmod +x /usr/local/bin/atop
     
     log_info "Binaries installed successfully"
 }
@@ -249,7 +249,7 @@ show_status() {
     echo "  Restart:       systemctl restart av1-super-daemon"
     echo "  Stop:          systemctl stop av1-super-daemon"
     echo "  Check metrics: curl http://127.0.0.1:7878/metrics"
-    echo "  Run TUI:       av1-dashboard"
+    echo "  Run TUI:       atop"
     echo ""
 }
 
