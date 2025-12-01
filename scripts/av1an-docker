@@ -6,9 +6,14 @@
 # This wrapper transparently maps paths so the daemon can call "av1an" 
 # as if it were installed locally.
 
-set -euo pipefail
+set -eo pipefail
 
 IMAGE="masterofzen/av1an:master"
+
+# If no arguments or just --version/--help, run without mounts
+if [[ $# -eq 0 ]] || [[ "$1" == "--version" ]] || [[ "$1" == "--help" ]] || [[ "$1" == "-h" ]]; then
+    exec docker run --rm --privileged "${IMAGE}" "$@"
+fi
 
 # Parse arguments to find -i, -o, and --temp paths that need mounting
 AV1AN_ARGS=()
