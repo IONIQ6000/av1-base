@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+#
+# ffmpeg Docker wrapper
+# Runs ffmpeg via masterofzen/av1an:master container
+#
+
+set -eo pipefail
+
+IMAGE="masterofzen/av1an:master"
+
+# For simple commands like -version, run without mounts
+if [[ $# -eq 0 ]] || [[ "$1" == "-version" ]] || [[ "$1" == "-help" ]] || [[ "$1" == "-h" ]]; then
+    exec docker run --rm --privileged "${IMAGE}" ffmpeg "$@"
+fi
+
+# For actual encoding, mount current directory
+exec docker run --rm \
+    --privileged \
+    -v "$(pwd):$(pwd)" \
+    -w "$(pwd)" \
+    "${IMAGE}" \
+    ffmpeg "$@"
