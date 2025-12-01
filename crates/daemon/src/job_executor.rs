@@ -4,6 +4,9 @@
 
 use crate::encode::{run_av1an, Av1anEncodeParams, EncodeError};
 use crate::metrics::{JobMetrics, SharedMetrics};
+use crate::replace::{atomic_replace, ReplaceError};
+use crate::size_gate::{check_size_gate, SizeGateResult};
+use crate::skip_marker::{write_skip_marker, write_why_sidecar};
 use crate::ConcurrencyPlan;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -27,7 +30,19 @@ pub enum JobError {
 
     /// File replacement failed
     #[error("Replacement failed: {0}")]
-    Replacement(std::io::Error),
+    Replacement(#[from] ReplaceError),
+
+    /// Size gate rejected the encode
+    #[error("Size gate rejected: output {output_bytes} >= original {original_bytes} * {ratio}")]
+    SizeGateRejected {
+        original_bytes: u64,
+        output_bytes: u64,
+        ratio: f32,
+    },
+
+    /// Failed to write skip marker
+    #[error("Failed to write skip marker: {0}")]
+    SkipMarkerFailed(std::io::Error),
 }
 
 /// Job state representing the current stage in the pipeline
@@ -39,10 +54,14 @@ pub enum JobState {
     Encoding,
     /// Job is being validated
     Validating,
+    /// Job is going through size gate check
+    SizeGating,
     /// Job is replacing original file
     Replacing,
     /// Job completed successfully
     Completed,
+    /// Job was skipped (e.g., size gate rejection)
+    Skipped(String),
     /// Job failed
     Failed(String),
 }
@@ -54,8 +73,10 @@ impl JobState {
             JobState::Queued => "queued",
             JobState::Encoding => "encoding",
             JobState::Validating => "validating",
+            JobState::SizeGating => "size_gating",
             JobState::Replacing => "replacing",
             JobState::Completed => "completed",
+            JobState::Skipped(_) => "skipped",
             JobState::Failed(_) => "failed",
         }
     }
@@ -116,6 +137,27 @@ impl Job {
     }
 }
 
+/// Configuration for the job executor pipeline
+#[derive(Debug, Clone)]
+pub struct JobExecutorConfig {
+    /// Maximum size ratio for size gate (output/original, e.g., 0.95)
+    pub max_size_ratio: f32,
+    /// Whether to keep the original file backup after replacement
+    pub keep_original: bool,
+    /// Whether to write .why.txt sidecar files explaining skips
+    pub write_why_sidecars: bool,
+}
+
+impl Default for JobExecutorConfig {
+    fn default() -> Self {
+        Self {
+            max_size_ratio: 0.95,
+            keep_original: false,
+            write_why_sidecars: true,
+        }
+    }
+}
+
 /// Job executor that manages encoding job execution with concurrency limiting
 ///
 /// Uses a tokio Semaphore to limit the number of concurrent encoding jobs
@@ -129,6 +171,8 @@ pub struct JobExecutor {
     metrics: SharedMetrics,
     /// Base directory for temporary chunk files
     temp_base_dir: PathBuf,
+    /// Configuration for the pipeline
+    config: JobExecutorConfig,
 }
 
 impl JobExecutor {
@@ -145,6 +189,30 @@ impl JobExecutor {
             concurrency_plan: plan,
             metrics,
             temp_base_dir,
+            config: JobExecutorConfig::default(),
+        }
+    }
+
+    /// Create a new JobExecutor with custom configuration
+    ///
+    /// # Arguments
+    /// * `plan` - Concurrency plan determining max concurrent jobs
+    /// * `metrics` - Shared metrics state for updating job progress
+    /// * `temp_base_dir` - Base directory for creating temporary chunk directories
+    /// * `config` - Configuration for the pipeline
+    pub fn with_config(
+        plan: ConcurrencyPlan,
+        metrics: SharedMetrics,
+        temp_base_dir: PathBuf,
+        config: JobExecutorConfig,
+    ) -> Self {
+        let permits = plan.max_concurrent_jobs as usize;
+        Self {
+            semaphore: Arc::new(Semaphore::new(permits)),
+            concurrency_plan: plan,
+            metrics,
+            temp_base_dir,
+            config,
         }
     }
 
@@ -179,12 +247,15 @@ impl JobExecutor {
 
     /// Execute a job through the encoding pipeline
     ///
-    /// This method:
+    /// This method implements the full encoding pipeline:
     /// 1. Acquires a semaphore permit (respecting max_concurrent_jobs)
-    /// 2. Creates a temporary chunks directory
-    /// 3. Runs Av1an encoding
-    /// 4. Updates metrics during execution
-    /// 5. Handles success/failure state transitions
+    /// 2. Creates a temporary chunks directory (Requirement 5.1)
+    /// 3. Runs Av1an encoding (Requirements 5.2, 5.3)
+    /// 4. Validates the output file
+    /// 5. Runs size gate check (Requirements 16.1, 16.2, 16.3, 16.4)
+    /// 6. Performs atomic file replacement (Requirements 17.1-17.6)
+    /// 7. Creates skip markers on size gate failure (Requirements 18.1, 18.2)
+    /// 8. Updates job state at each stage
     ///
     /// # Arguments
     /// * `job` - The job to execute
@@ -221,20 +292,123 @@ impl JobExecutor {
                 job.state = JobState::Validating;
                 self.update_job_metrics(&job).await;
 
-                // For now, validation always passes
-                // In a full implementation, this would check file integrity, size, etc.
-                job.state = JobState::Replacing;
+                // Validate the output file exists and has content
+                let output_metadata = match std::fs::metadata(&job.output_path) {
+                    Ok(m) => m,
+                    Err(e) => {
+                        let error_msg = format!("Output file not found: {}", e);
+                        job.state = JobState::Failed(error_msg.clone());
+                        self.update_job_metrics(&job).await;
+                        self.increment_failed_jobs().await;
+                        let _ = std::fs::remove_dir_all(&temp_chunks_dir);
+                        return Err(JobError::Validation(error_msg));
+                    }
+                };
+
+                let output_bytes = output_metadata.len();
+                if output_bytes == 0 {
+                    let error_msg = "Output file is empty".to_string();
+                    job.state = JobState::Failed(error_msg.clone());
+                    self.update_job_metrics(&job).await;
+                    self.increment_failed_jobs().await;
+                    let _ = std::fs::remove_dir_all(&temp_chunks_dir);
+                    let _ = std::fs::remove_file(&job.output_path);
+                    return Err(JobError::Validation(error_msg));
+                }
+
+                // Size gate check (Requirements 16.1, 16.2, 16.3, 16.4)
+                job.state = JobState::SizeGating;
                 self.update_job_metrics(&job).await;
 
-                // Mark as completed (Requirement 5.4)
-                job.state = JobState::Completed;
-                self.update_job_metrics(&job).await;
-                self.increment_completed_jobs().await;
+                let size_gate_result = check_size_gate(
+                    job.size_in_bytes_before,
+                    output_bytes,
+                    self.config.max_size_ratio,
+                );
 
-                // Clean up temp directory
-                let _ = std::fs::remove_dir_all(&temp_chunks_dir);
+                match size_gate_result {
+                    SizeGateResult::Accept => {
+                        // Size gate passed, proceed to replacement
+                        job.state = JobState::Replacing;
+                        self.update_job_metrics(&job).await;
 
-                Ok(job)
+                        // Atomic file replacement (Requirements 17.1-17.6)
+                        match atomic_replace(
+                            &job.input_path,
+                            &job.output_path,
+                            self.config.keep_original,
+                        ) {
+                            Ok(()) => {
+                                // Mark as completed (Requirement 5.4)
+                                job.state = JobState::Completed;
+                                self.update_job_metrics(&job).await;
+                                self.increment_completed_jobs().await;
+
+                                // Update size_in_bytes_after for metrics
+                                self.update_job_size_after(&job.id, output_bytes).await;
+
+                                // Clean up temp directory and output file
+                                let _ = std::fs::remove_dir_all(&temp_chunks_dir);
+                                let _ = std::fs::remove_file(&job.output_path);
+
+                                Ok(job)
+                            }
+                            Err(replace_err) => {
+                                // Replacement failed (Requirement 17.6)
+                                let error_msg = replace_err.to_string();
+                                job.state = JobState::Failed(error_msg);
+                                self.update_job_metrics(&job).await;
+                                self.increment_failed_jobs().await;
+
+                                // Preserve temp files for manual inspection
+                                // Don't clean up temp_chunks_dir or output_path
+
+                                Err(JobError::Replacement(replace_err))
+                            }
+                        }
+                    }
+                    SizeGateResult::Reject {
+                        original_bytes,
+                        output_bytes,
+                        ratio,
+                    } => {
+                        // Size gate rejected (Requirement 16.3)
+                        let skip_reason = format!(
+                            "Size gate rejected: output {} bytes ({:.1}%) >= original {} bytes * {:.2}",
+                            output_bytes,
+                            ratio * 100.0,
+                            original_bytes,
+                            self.config.max_size_ratio
+                        );
+
+                        job.state = JobState::Skipped(skip_reason.clone());
+                        self.update_job_metrics(&job).await;
+                        self.increment_skipped_jobs().await;
+
+                        // Delete temp output (Requirement 16.3)
+                        let _ = std::fs::remove_file(&job.output_path);
+
+                        // Create skip markers (Requirements 18.1, 18.2)
+                        write_skip_marker(&job.input_path)
+                            .map_err(JobError::SkipMarkerFailed)?;
+                        
+                        // Write why sidecar if enabled
+                        let _ = write_why_sidecar(
+                            &job.input_path,
+                            &skip_reason,
+                            self.config.write_why_sidecars,
+                        );
+
+                        // Clean up temp directory
+                        let _ = std::fs::remove_dir_all(&temp_chunks_dir);
+
+                        Err(JobError::SizeGateRejected {
+                            original_bytes,
+                            output_bytes,
+                            ratio,
+                        })
+                    }
+                }
             }
             Ok(Err(encode_err)) => {
                 // Encoding failed (Requirement 5.3)
@@ -292,6 +466,22 @@ impl JobExecutor {
     async fn increment_failed_jobs(&self) {
         let mut metrics = self.metrics.write().await;
         metrics.failed_jobs += 1;
+    }
+
+    /// Increment skipped jobs counter (for size gate rejections)
+    async fn increment_skipped_jobs(&self) {
+        let mut metrics = self.metrics.write().await;
+        // Skipped jobs are counted as failed in the aggregate metrics
+        metrics.failed_jobs += 1;
+    }
+
+    /// Update the size_in_bytes_after for a completed job
+    async fn update_job_size_after(&self, job_id: &str, size_bytes: u64) {
+        let mut metrics = self.metrics.write().await;
+        if let Some(job_metrics) = metrics.jobs.iter_mut().find(|j| j.id == job_id) {
+            job_metrics.size_in_bytes_after = size_bytes;
+        }
+        metrics.total_bytes_encoded += size_bytes;
     }
 }
 
@@ -366,14 +556,16 @@ mod tests {
     }
 
     // Test job state transitions
-    // **Validates: Requirements 5.1, 5.2, 5.3, 5.4**
+    // **Validates: Requirements 5.1, 5.2, 5.3, 5.4, 16.3**
     #[test]
     fn test_job_state_as_str() {
         assert_eq!(JobState::Queued.as_str(), "queued");
         assert_eq!(JobState::Encoding.as_str(), "encoding");
         assert_eq!(JobState::Validating.as_str(), "validating");
+        assert_eq!(JobState::SizeGating.as_str(), "size_gating");
         assert_eq!(JobState::Replacing.as_str(), "replacing");
         assert_eq!(JobState::Completed.as_str(), "completed");
+        assert_eq!(JobState::Skipped("reason".to_string()).as_str(), "skipped");
         assert_eq!(JobState::Failed("error".to_string()).as_str(), "failed");
     }
 
@@ -425,6 +617,38 @@ mod tests {
         assert_eq!(snapshot.jobs.len(), 1);
         assert_eq!(snapshot.jobs[0].id, "metrics-test");
         assert_eq!(snapshot.jobs[0].stage, "queued");
+    }
+
+    // Test JobExecutorConfig defaults
+    #[test]
+    fn test_job_executor_config_defaults() {
+        let config = JobExecutorConfig::default();
+        assert!((config.max_size_ratio - 0.95).abs() < 0.001);
+        assert!(!config.keep_original);
+        assert!(config.write_why_sidecars);
+    }
+
+    // Test JobExecutor with custom config
+    #[tokio::test]
+    async fn test_executor_with_custom_config() {
+        let plan = create_test_plan(2);
+        let metrics = new_shared_metrics();
+        let config = JobExecutorConfig {
+            max_size_ratio: 0.80,
+            keep_original: true,
+            write_why_sidecars: false,
+        };
+        let executor = JobExecutor::with_config(
+            plan,
+            metrics,
+            PathBuf::from("/tmp"),
+            config,
+        );
+
+        assert_eq!(executor.available_permits(), 2);
+        assert!((executor.config.max_size_ratio - 0.80).abs() < 0.001);
+        assert!(executor.config.keep_original);
+        assert!(!executor.config.write_why_sidecars);
     }
 
     // Test concurrent permit acquisition with async tasks

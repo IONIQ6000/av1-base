@@ -2,12 +2,20 @@
 //!
 //! Provides the daemon entry point, startup sequence, and main processing loop.
 
+use crate::classify::classify_source;
 use crate::config::{Config, ConfigError};
 use crate::concurrency::{derive_plan, ConcurrencyPlan};
+use crate::gates::{check_gates, probe_file, GateResult, GatesConfig as DaemonGatesConfig};
 use crate::job_executor::{Job, JobError, JobExecutor};
+use crate::jobs::{create_job, job_exists_for_path, load_jobs, save_job};
 use crate::metrics::{collect_system_metrics, new_shared_metrics, SharedMetrics};
 use crate::metrics_server::run_metrics_server;
+use crate::scan::scan_libraries;
+use crate::skip_marker::{write_skip_marker, write_why_sidecar};
+use crate::stability::{check_stability, StabilityResult};
 use crate::startup::{run_startup_checks, StartupError};
+use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -33,6 +41,33 @@ pub enum DaemonError {
     /// Server error
     #[error("Server error: {0}")]
     Server(String),
+
+    /// IO error (e.g., directory creation)
+    #[error("IO error: {0}")]
+    Io(#[from] io::Error),
+}
+
+/// Creates required directories for daemon operation.
+///
+/// Creates the job_state_dir and temp_output_dir if they don't exist.
+///
+/// # Arguments
+/// * `config` - The daemon configuration containing path settings
+///
+/// # Returns
+/// * `Ok(())` - Directories created or already exist
+/// * `Err(io::Error)` - Failed to create directories
+///
+/// # Requirements
+/// - 14.1: Job state directory must exist for persisting job JSON files
+pub fn create_required_directories(config: &Config) -> Result<(), io::Error> {
+    // Create job_state_dir if not exists
+    fs::create_dir_all(&config.paths.job_state_dir)?;
+
+    // Create temp_output_dir if not exists
+    fs::create_dir_all(&config.paths.temp_output_dir)?;
+
+    Ok(())
 }
 
 /// Daemon state containing all runtime components
@@ -58,8 +93,9 @@ impl Daemon {
     /// 1. Load config from file
     /// 2. Apply environment overrides
     /// 3. Run startup checks (software-only, av1an, ffmpeg)
-    /// 4. Derive concurrency plan
-    /// 5. Initialize shared metrics
+    /// 4. Create required directories (job_state_dir, temp_output_dir)
+    /// 5. Derive concurrency plan
+    /// 6. Initialize shared metrics
     ///
     /// # Arguments
     /// * `config_path` - Path to the config.toml file
@@ -73,6 +109,7 @@ impl Daemon {
     /// - 4.1: Verify av1an --version executes successfully
     /// - 4.3: Verify FFmpeg version is 8.0 or newer
     /// - 3.1: Reject configuration with hardware encoder flags when disallow_hardware_encoding is enabled
+    /// - 14.1: Create job_state_dir for persisting job JSON files
     pub async fn new<P: AsRef<Path>>(
         config_path: P,
         temp_base_dir: PathBuf,
@@ -83,10 +120,13 @@ impl Daemon {
         // Step 3: Run startup checks in order: software-only, av1an, ffmpeg
         run_startup_checks(&config)?;
 
-        // Step 4: Derive concurrency plan from configuration
+        // Step 4: Create required directories
+        create_required_directories(&config)?;
+
+        // Step 5: Derive concurrency plan from configuration
         let concurrency_plan = derive_plan(&config);
 
-        // Step 5: Initialize shared metrics
+        // Step 6: Initialize shared metrics
         let metrics = new_shared_metrics();
 
         // Create job executor
@@ -115,6 +155,9 @@ impl Daemon {
     pub async fn with_config(config: Config, temp_base_dir: PathBuf) -> Result<Self, DaemonError> {
         // Run startup checks
         run_startup_checks(&config)?;
+
+        // Create required directories
+        create_required_directories(&config)?;
 
         // Derive concurrency plan
         let concurrency_plan = derive_plan(&config);
@@ -273,6 +316,269 @@ impl Daemon {
         Ok(())
     }
 
+    /// Run a single scan cycle to discover and queue new encoding jobs.
+    ///
+    /// This method implements the scan cycle:
+    /// 1. Load existing jobs to avoid duplicates
+    /// 2. Scan all library_roots for video files
+    /// 3. For each candidate: stability check, probe, gates, classify, create job
+    /// 4. Queue jobs for execution
+    ///
+    /// # Requirements
+    /// - 11.1: Recursively walk each configured library_root directory
+    /// - 12.1-12.4: Verify file stability before processing
+    /// - 13.1-13.6: Gate files based on probe results
+    /// - 14.3: Load existing jobs to avoid duplicate work
+    /// - 15.1-15.5: Classify source files
+    pub async fn run_scan_cycle(&self) -> Result<usize, DaemonError> {
+        let mut jobs_queued = 0;
+
+        // Step 1: Load existing jobs to avoid duplicates (Requirement 14.3)
+        let existing_jobs = load_jobs(&self.config.paths.job_state_dir).unwrap_or_else(|e| {
+            eprintln!("Warning: Failed to load existing jobs: {}", e);
+            Vec::new()
+        });
+
+        // Step 2: Scan all library_roots (Requirement 11.1)
+        let candidates = scan_libraries(&self.config.scan.library_roots);
+
+        // Create gates config from daemon config
+        let gates_config = DaemonGatesConfig {
+            min_bytes: self.config.gates.min_bytes,
+            max_size_ratio: self.config.gates.max_size_ratio,
+            keep_original: self.config.gates.keep_original,
+        };
+
+        // Step 3: Process each candidate
+        for candidate in candidates {
+            // Skip if job already exists for this path (Requirement 14.3)
+            if job_exists_for_path(&existing_jobs, &candidate.path) {
+                continue;
+            }
+
+            // Step 3a: Stability check (Requirements 12.1-12.4)
+            let stability_result = match check_stability(
+                &candidate.path,
+                candidate.size_bytes,
+                self.config.scan.stability_wait_secs,
+            )
+            .await
+            {
+                Ok(result) => result,
+                Err(e) => {
+                    eprintln!(
+                        "Warning: Stability check failed for {:?}: {}",
+                        candidate.path, e
+                    );
+                    continue;
+                }
+            };
+
+            // Skip unstable files (Requirement 12.3)
+            if let StabilityResult::Unstable { .. } = stability_result {
+                continue;
+            }
+
+            // Step 3b: Probe file (Requirement 13.1)
+            let probe_result = match probe_file(&candidate.path) {
+                Ok(result) => result,
+                Err(e) => {
+                    // Create skip marker on probe failure (Requirement 13.2)
+                    let reason = format!("ffprobe failed: {}", e);
+                    let _ = write_skip_marker(&candidate.path);
+                    let _ = write_why_sidecar(
+                        &candidate.path,
+                        &reason,
+                        self.config.scan.write_why_sidecars,
+                    );
+                    continue;
+                }
+            };
+
+            // Step 3c: Check gates (Requirements 13.3-13.6)
+            let gate_result = check_gates(&probe_result, candidate.size_bytes, &gates_config);
+
+            match gate_result {
+                GateResult::Skip { reason } => {
+                    // Create skip markers (Requirements 13.3, 13.4, 13.5)
+                    let _ = write_skip_marker(&candidate.path);
+                    let _ = write_why_sidecar(
+                        &candidate.path,
+                        &reason,
+                        self.config.scan.write_why_sidecars,
+                    );
+                    continue;
+                }
+                GateResult::Pass(probe) => {
+                    // Step 3d: Classify source (Requirements 15.1-15.4)
+                    let source_type = classify_source(&candidate.path, &probe);
+
+                    // Step 3e: Create job (Requirement 14.1)
+                    let managed_job = create_job(
+                        &candidate,
+                        probe.clone(),
+                        source_type,
+                        &self.config.paths.temp_output_dir,
+                    );
+
+                    // Save job to state directory (Requirement 14.2)
+                    if let Err(e) = save_job(&managed_job, &self.config.paths.job_state_dir) {
+                        eprintln!("Warning: Failed to save job state: {}", e);
+                    }
+
+                    // Step 4: Queue job for execution
+                    let executor_job = Job::new(
+                        managed_job.id.clone(),
+                        managed_job.input_path.clone(),
+                        managed_job.output_path.clone(),
+                    );
+
+                    // Set the original file size for size gate comparison
+                    let mut job_with_size = executor_job;
+                    job_with_size.size_in_bytes_before = candidate.size_bytes;
+
+                    if let Err(e) = self.submit_job(job_with_size).await {
+                        eprintln!("Warning: Failed to queue job: {}", e);
+                        continue;
+                    }
+
+                    // Update queue length in metrics
+                    {
+                        let mut metrics = self.metrics.write().await;
+                        metrics.queue_len += 1;
+                    }
+
+                    jobs_queued += 1;
+                }
+            }
+        }
+
+        Ok(jobs_queued)
+    }
+
+    /// Start the scan cycle task
+    ///
+    /// Periodically runs scan cycles to discover new files.
+    ///
+    /// # Requirements
+    /// - 11.1: Recursively walk each configured library_root directory
+    pub fn start_scan_cycle(&self) -> tokio::task::JoinHandle<()> {
+        let config = self.config.clone();
+        let job_tx = self.job_tx.clone();
+        let metrics = self.metrics.clone();
+        let job_state_dir = self.config.paths.job_state_dir.clone();
+        let temp_output_dir = self.config.paths.temp_output_dir.clone();
+
+        tokio::spawn(async move {
+            loop {
+                // Load existing jobs
+                let existing_jobs = load_jobs(&job_state_dir).unwrap_or_else(|e| {
+                    eprintln!("Warning: Failed to load existing jobs: {}", e);
+                    Vec::new()
+                });
+
+                // Scan libraries
+                let candidates = scan_libraries(&config.scan.library_roots);
+
+                // Create gates config
+                let gates_config = DaemonGatesConfig {
+                    min_bytes: config.gates.min_bytes,
+                    max_size_ratio: config.gates.max_size_ratio,
+                    keep_original: config.gates.keep_original,
+                };
+
+                // Process candidates
+                for candidate in candidates {
+                    // Skip if job already exists
+                    if job_exists_for_path(&existing_jobs, &candidate.path) {
+                        continue;
+                    }
+
+                    // Stability check
+                    let stability_result = match check_stability(
+                        &candidate.path,
+                        candidate.size_bytes,
+                        config.scan.stability_wait_secs,
+                    )
+                    .await
+                    {
+                        Ok(result) => result,
+                        Err(_) => continue,
+                    };
+
+                    if let StabilityResult::Unstable { .. } = stability_result {
+                        continue;
+                    }
+
+                    // Probe file
+                    let probe_result = match probe_file(&candidate.path) {
+                        Ok(result) => result,
+                        Err(e) => {
+                            let reason = format!("ffprobe failed: {}", e);
+                            let _ = write_skip_marker(&candidate.path);
+                            let _ = write_why_sidecar(
+                                &candidate.path,
+                                &reason,
+                                config.scan.write_why_sidecars,
+                            );
+                            continue;
+                        }
+                    };
+
+                    // Check gates
+                    let gate_result =
+                        check_gates(&probe_result, candidate.size_bytes, &gates_config);
+
+                    match gate_result {
+                        GateResult::Skip { reason } => {
+                            let _ = write_skip_marker(&candidate.path);
+                            let _ = write_why_sidecar(
+                                &candidate.path,
+                                &reason,
+                                config.scan.write_why_sidecars,
+                            );
+                            continue;
+                        }
+                        GateResult::Pass(probe) => {
+                            // Classify source
+                            let source_type = classify_source(&candidate.path, &probe);
+
+                            // Create job
+                            let managed_job = create_job(
+                                &candidate,
+                                probe,
+                                source_type,
+                                &temp_output_dir,
+                            );
+
+                            // Save job state
+                            if let Err(e) = save_job(&managed_job, &job_state_dir) {
+                                eprintln!("Warning: Failed to save job state: {}", e);
+                            }
+
+                            // Create executor job
+                            let mut executor_job = Job::new(
+                                managed_job.id.clone(),
+                                managed_job.input_path.clone(),
+                                managed_job.output_path.clone(),
+                            );
+                            executor_job.size_in_bytes_before = candidate.size_bytes;
+
+                            // Queue job
+                            if job_tx.send(executor_job).await.is_ok() {
+                                let mut m = metrics.write().await;
+                                m.queue_len += 1;
+                            }
+                        }
+                    }
+                }
+
+                // Wait before next scan cycle
+                tokio::time::sleep(Duration::from_secs(config.scan.scan_interval_secs)).await;
+            }
+        })
+    }
+
     /// Run the daemon with all background tasks
     ///
     /// Starts the metrics server, metrics updater, and main processing loop.
@@ -282,6 +588,23 @@ impl Daemon {
 
         // Start metrics updater
         let _updater_handle = self.start_metrics_updater();
+
+        // Run main loop
+        self.run().await
+    }
+
+    /// Run the daemon with all background tasks including scan cycle
+    ///
+    /// Starts the metrics server, metrics updater, scan cycle, and main processing loop.
+    pub async fn run_with_scanning(&self) -> Result<(), DaemonError> {
+        // Start metrics server
+        let _server_handle = self.start_metrics_server();
+
+        // Start metrics updater
+        let _updater_handle = self.start_metrics_updater();
+
+        // Start scan cycle
+        let _scan_handle = self.start_scan_cycle();
 
         // Run main loop
         self.run().await
@@ -299,7 +622,8 @@ fn chrono_timestamp_ms() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{Av1anConfig, CpuConfig, EncoderSafetyConfig};
+    use crate::config::{Av1anConfig, CpuConfig, EncoderSafetyConfig, GatesConfig, PathsConfig, ScanConfig};
+    use tempfile::TempDir;
 
     fn create_test_config() -> Config {
         Config {
@@ -314,6 +638,31 @@ mod tests {
             encoder_safety: EncoderSafetyConfig {
                 disallow_hardware_encoding: true,
             },
+            paths: PathsConfig::default(),
+            scan: ScanConfig::default(),
+            gates: GatesConfig::default(),
+        }
+    }
+
+    fn create_test_config_with_paths(job_state_dir: PathBuf, temp_output_dir: PathBuf) -> Config {
+        Config {
+            cpu: CpuConfig {
+                logical_cores: Some(32),
+                target_cpu_utilization: 0.85,
+            },
+            av1an: Av1anConfig {
+                workers_per_job: 8,
+                max_concurrent_jobs: 1,
+            },
+            encoder_safety: EncoderSafetyConfig {
+                disallow_hardware_encoding: true,
+            },
+            paths: PathsConfig {
+                job_state_dir,
+                temp_output_dir,
+            },
+            scan: ScanConfig::default(),
+            gates: GatesConfig::default(),
         }
     }
 
@@ -339,6 +688,9 @@ mod tests {
                 max_concurrent_jobs: 0, // auto-derive
             },
             encoder_safety: EncoderSafetyConfig::default(),
+            paths: PathsConfig::default(),
+            scan: ScanConfig::default(),
+            gates: GatesConfig::default(),
         };
 
         let daemon = Daemon::new_without_checks(config, PathBuf::from("/tmp"));
@@ -387,5 +739,77 @@ mod tests {
         let ts = chrono_timestamp_ms();
         // Should be a reasonable timestamp (after year 2020)
         assert!(ts > 1577836800000); // Jan 1, 2020
+    }
+
+    #[test]
+    fn test_create_required_directories_creates_both_dirs() {
+        let temp_dir = TempDir::new().unwrap();
+        let job_state_dir = temp_dir.path().join("jobs");
+        let temp_output_dir = temp_dir.path().join("temp");
+
+        // Directories should not exist yet
+        assert!(!job_state_dir.exists());
+        assert!(!temp_output_dir.exists());
+
+        let config = create_test_config_with_paths(job_state_dir.clone(), temp_output_dir.clone());
+
+        // Create directories
+        create_required_directories(&config).expect("Should create directories");
+
+        // Both directories should now exist
+        assert!(job_state_dir.exists());
+        assert!(job_state_dir.is_dir());
+        assert!(temp_output_dir.exists());
+        assert!(temp_output_dir.is_dir());
+    }
+
+    #[test]
+    fn test_create_required_directories_nested_paths() {
+        let temp_dir = TempDir::new().unwrap();
+        let job_state_dir = temp_dir.path().join("nested/path/to/jobs");
+        let temp_output_dir = temp_dir.path().join("another/nested/temp");
+
+        let config = create_test_config_with_paths(job_state_dir.clone(), temp_output_dir.clone());
+
+        // Create directories (should create all parent directories)
+        create_required_directories(&config).expect("Should create nested directories");
+
+        assert!(job_state_dir.exists());
+        assert!(temp_output_dir.exists());
+    }
+
+    #[test]
+    fn test_create_required_directories_idempotent() {
+        let temp_dir = TempDir::new().unwrap();
+        let job_state_dir = temp_dir.path().join("jobs");
+        let temp_output_dir = temp_dir.path().join("temp");
+
+        let config = create_test_config_with_paths(job_state_dir.clone(), temp_output_dir.clone());
+
+        // Create directories twice - should not fail
+        create_required_directories(&config).expect("First call should succeed");
+        create_required_directories(&config).expect("Second call should also succeed");
+
+        assert!(job_state_dir.exists());
+        assert!(temp_output_dir.exists());
+    }
+
+    #[test]
+    fn test_create_required_directories_with_existing_dirs() {
+        let temp_dir = TempDir::new().unwrap();
+        let job_state_dir = temp_dir.path().join("jobs");
+        let temp_output_dir = temp_dir.path().join("temp");
+
+        // Pre-create the directories
+        fs::create_dir_all(&job_state_dir).unwrap();
+        fs::create_dir_all(&temp_output_dir).unwrap();
+
+        let config = create_test_config_with_paths(job_state_dir.clone(), temp_output_dir.clone());
+
+        // Should succeed even if directories already exist
+        create_required_directories(&config).expect("Should succeed with existing directories");
+
+        assert!(job_state_dir.exists());
+        assert!(temp_output_dir.exists());
     }
 }

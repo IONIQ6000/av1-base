@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 use std::env;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Error type for configuration operations
 #[derive(Debug)]
@@ -101,6 +101,106 @@ impl Default for EncoderSafetyConfig {
     }
 }
 
+/// Paths configuration for job state and temp output directories
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PathsConfig {
+    /// Directory where job JSON files are persisted
+    #[serde(default = "default_job_state_dir")]
+    pub job_state_dir: PathBuf,
+    /// Directory for temporary encode output files
+    #[serde(default = "default_temp_output_dir")]
+    pub temp_output_dir: PathBuf,
+}
+
+fn default_job_state_dir() -> PathBuf {
+    PathBuf::from("/var/lib/av1-daemon/jobs")
+}
+
+fn default_temp_output_dir() -> PathBuf {
+    PathBuf::from("/var/lib/av1-daemon/temp")
+}
+
+impl Default for PathsConfig {
+    fn default() -> Self {
+        Self {
+            job_state_dir: default_job_state_dir(),
+            temp_output_dir: default_temp_output_dir(),
+        }
+    }
+}
+
+/// Scan configuration for library scanning
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ScanConfig {
+    /// Library root directories to scan for video files
+    #[serde(default)]
+    pub library_roots: Vec<PathBuf>,
+    /// Seconds to wait for file stability before processing
+    #[serde(default = "default_stability_wait_secs")]
+    pub stability_wait_secs: u64,
+    /// Whether to write .why.txt sidecar files explaining skips
+    #[serde(default = "default_write_why_sidecars")]
+    pub write_why_sidecars: bool,
+    /// Interval in seconds between scan cycles
+    #[serde(default = "default_scan_interval_secs")]
+    pub scan_interval_secs: u64,
+}
+
+fn default_stability_wait_secs() -> u64 {
+    10
+}
+
+fn default_write_why_sidecars() -> bool {
+    true
+}
+
+fn default_scan_interval_secs() -> u64 {
+    60
+}
+
+impl Default for ScanConfig {
+    fn default() -> Self {
+        Self {
+            library_roots: Vec::new(),
+            stability_wait_secs: default_stability_wait_secs(),
+            write_why_sidecars: default_write_why_sidecars(),
+            scan_interval_secs: default_scan_interval_secs(),
+        }
+    }
+}
+
+/// Gates configuration for file validation
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct GatesConfig {
+    /// Minimum file size in bytes to process
+    #[serde(default = "default_min_bytes")]
+    pub min_bytes: u64,
+    /// Maximum output/original size ratio (0, 1]
+    #[serde(default = "default_max_size_ratio")]
+    pub max_size_ratio: f32,
+    /// Whether to keep original file backup after replacement
+    #[serde(default)]
+    pub keep_original: bool,
+}
+
+fn default_min_bytes() -> u64 {
+    1048576 // 1 MB
+}
+
+fn default_max_size_ratio() -> f32 {
+    0.95
+}
+
+impl Default for GatesConfig {
+    fn default() -> Self {
+        Self {
+            min_bytes: default_min_bytes(),
+            max_size_ratio: default_max_size_ratio(),
+            keep_original: false,
+        }
+    }
+}
+
 /// Main configuration structure
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct Config {
@@ -110,6 +210,12 @@ pub struct Config {
     pub av1an: Av1anConfig,
     #[serde(default)]
     pub encoder_safety: EncoderSafetyConfig,
+    #[serde(default)]
+    pub paths: PathsConfig,
+    #[serde(default)]
+    pub scan: ScanConfig,
+    #[serde(default)]
+    pub gates: GatesConfig,
 }
 
 

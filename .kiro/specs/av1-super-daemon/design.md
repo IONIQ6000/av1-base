@@ -4,11 +4,11 @@
 
 The AV1 Super Daemon is a Rust-based media encoding automation system consisting of three main components:
 
-1. **Daemon** (`cli-daemon` / `daemon` crates) - Background service that manages the encoding pipeline, job queue, and metrics collection
+1. **Daemon** (`cli-daemon` / `daemon` crates) - Background service that scans library directories, gates candidates, manages the encoding pipeline, persists job state as JSON, and handles atomic file replacement
 2. **Av1an Integration** - Vendored from source as a workspace member, invoked via CLI with fixed film-grain-tuned settings
 3. **TUI Dashboard** (`av1-dashboard` crate) - Terminal interface built with Ratatui for real-time monitoring
 
-The system enforces software-only encoding using SVT-AV1 through Av1an, requires FFmpeg 8+, and exposes metrics via HTTP for dashboard consumption.
+The system enforces software-only encoding using SVT-AV1 through Av1an, requires FFmpeg 8+, uses skip markers (`.av1skip`) to prevent reprocessing, validates output size against originals, and exposes metrics via HTTP for dashboard consumption.
 
 ## Architecture
 
@@ -19,18 +19,29 @@ graph TB
         Startup --> Checks[Preflight Checks]
         Checks --> |Av1an + FFmpeg 8| Loop[Daemon Loop]
         
-        Loop --> Scanner[File Scanner]
-        Loop --> Queue[Job Queue]
+        Loop --> Scanner[Library Scanner]
+        Scanner --> Stability[Stability Checker]
+        Stability --> Gates[Gate Checker]
+        Gates --> |ffprobe| Classify[Source Classifier]
+        Classify --> JobMgr[Job Manager]
+        
+        JobMgr --> |JSON persist| Queue[Job Queue]
         Loop --> Executor[Job Executor]
         
         Executor --> |Semaphore| Encode[Av1an Encoder]
         Executor --> Validate[Validator]
-        Executor --> Replace[File Replacer]
+        Executor --> SizeGate[Size Gate]
+        SizeGate --> Replace[Atomic Replacer]
         
         Metrics[Metrics Collector] --> State[Shared State]
         Executor --> State
+        JobMgr --> State
         
         Server[HTTP Server] --> State
+        
+        SkipMarker[Skip Marker Writer]
+        Gates --> |skip| SkipMarker
+        SizeGate --> |reject| SkipMarker
     end
     
     subgraph "External Tools"
@@ -42,7 +53,17 @@ graph TB
         Dashboard[av1-dashboard] --> |HTTP /metrics| Server
     end
     
+    subgraph "Filesystem"
+        Libraries[Library Roots]
+        JobStateDir[Job State Dir]
+        TempDir[Temp Output Dir]
+    end
+    
+    Scanner --> Libraries
+    JobMgr --> JobStateDir
+    Encode --> TempDir
     Encode --> Av1an
+    Gates --> FFmpeg
     Validate --> FFmpeg
     
     Config[config.toml] --> Startup
@@ -59,6 +80,9 @@ pub struct Config {
     pub cpu: CpuConfig,
     pub av1an: Av1anConfig,
     pub encoder_safety: EncoderSafetyConfig,
+    pub scan: ScanConfig,
+    pub paths: PathsConfig,
+    pub gates: GatesConfig,
 }
 
 pub struct CpuConfig {
@@ -73,6 +97,23 @@ pub struct Av1anConfig {
 
 pub struct EncoderSafetyConfig {
     pub disallow_hardware_encoding: bool,  // default true
+}
+
+pub struct ScanConfig {
+    pub library_roots: Vec<PathBuf>,       // directories to scan
+    pub stability_wait_secs: u64,          // default 10
+    pub write_why_sidecars: bool,          // default true
+}
+
+pub struct PathsConfig {
+    pub job_state_dir: PathBuf,            // where job JSON files live
+    pub temp_output_dir: PathBuf,          // temp encode output
+}
+
+pub struct GatesConfig {
+    pub min_bytes: u64,                    // minimum file size
+    pub max_size_ratio: f32,               // output/original ratio threshold (0,1]
+    pub keep_original: bool,               // preserve backup after replacement
 }
 
 // Interface
@@ -207,6 +248,155 @@ impl App {
 }
 ```
 
+### 9. Scanner Module (`crates/daemon/src/scan.rs`)
+
+```rust
+pub struct ScanCandidate {
+    pub path: PathBuf,
+    pub size_bytes: u64,
+    pub modified_time: SystemTime,
+}
+
+// Interface
+pub fn scan_libraries(roots: &[PathBuf]) -> Vec<ScanCandidate>;
+pub fn has_skip_marker(path: &Path) -> bool;
+pub fn skip_marker_path(video_path: &Path) -> PathBuf;
+
+// Constants
+pub const VIDEO_EXTENSIONS: &[&str] = &[".mkv", ".mp4", ".avi", ".mov", ".m4v", ".ts", ".m2ts"];
+```
+
+### 10. Stability Module (`crates/daemon/src/stable.rs`)
+
+```rust
+pub enum StabilityResult {
+    Stable,
+    Unstable { initial_size: u64, current_size: u64 },
+}
+
+// Interface
+pub async fn check_stability(
+    path: &Path,
+    initial_size: u64,
+    wait_secs: u64,
+) -> Result<StabilityResult, io::Error>;
+```
+
+### 11. Gates Module (`crates/daemon/src/gates.rs`)
+
+```rust
+pub struct ProbeResult {
+    pub video_streams: Vec<VideoStream>,
+    pub audio_streams: Vec<AudioStream>,
+    pub format: FormatInfo,
+}
+
+pub struct VideoStream {
+    pub codec_name: String,
+    pub width: u32,
+    pub height: u32,
+    pub bitrate_kbps: Option<f32>,
+}
+
+pub enum GateResult {
+    Pass(ProbeResult),
+    Skip { reason: String },
+}
+
+// Interface
+pub fn probe_file(path: &Path) -> Result<ProbeResult, ProbeError>;
+pub fn check_gates(probe: &ProbeResult, file_size: u64, cfg: &GatesConfig) -> GateResult;
+```
+
+### 12. Classifier Module (`crates/daemon/src/classify.rs`)
+
+```rust
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum SourceType {
+    WebLike,
+    DiscLike,
+    Unknown,
+}
+
+// Interface
+pub fn classify_source(path: &Path, probe: &ProbeResult) -> SourceType;
+```
+
+### 13. Job Manager Module (`crates/daemon/src/jobs.rs`)
+
+```rust
+pub struct Job {
+    pub id: String,
+    pub input_path: PathBuf,
+    pub output_path: PathBuf,
+    pub stage: JobStage,
+    pub status: JobStatus,
+    pub source_type: SourceType,
+    pub probe_result: ProbeResult,
+    pub created_at: i64,
+    pub updated_at: i64,
+    pub error_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum JobStage {
+    Queued,
+    Encoding,
+    Validating,
+    SizeGating,
+    Replacing,
+    Complete,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum JobStatus {
+    Pending,
+    Running,
+    Success,
+    Failed,
+    Skipped,
+}
+
+// Interface
+pub fn create_job(candidate: &ScanCandidate, probe: ProbeResult, source_type: SourceType) -> Job;
+pub fn save_job(job: &Job, state_dir: &Path) -> Result<(), io::Error>;
+pub fn load_jobs(state_dir: &Path) -> Result<Vec<Job>, io::Error>;
+pub fn job_exists_for_path(jobs: &[Job], path: &Path) -> bool;
+```
+
+### 14. Size Gate Module (`crates/daemon/src/size_gate.rs`)
+
+```rust
+pub enum SizeGateResult {
+    Accept,
+    Reject { original_bytes: u64, output_bytes: u64, ratio: f32 },
+}
+
+// Interface
+pub fn check_size_gate(original_bytes: u64, output_bytes: u64, max_ratio: f32) -> SizeGateResult;
+```
+
+### 15. Replacer Module (`crates/daemon/src/replace.rs`)
+
+```rust
+// Interface
+pub fn atomic_replace(
+    original_path: &Path,
+    encoded_path: &Path,
+    keep_original: bool,
+) -> Result<(), ReplaceError>;
+
+pub fn backup_path(original: &Path) -> PathBuf;  // <name>.orig.<timestamp>
+```
+
+### 16. Skip Marker Module (`crates/daemon/src/skip_marker.rs`)
+
+```rust
+// Interface
+pub fn write_skip_marker(video_path: &Path) -> Result<(), io::Error>;
+pub fn write_why_sidecar(video_path: &Path, reason: &str) -> Result<(), io::Error>;
+```
+
 ## Data Models
 
 ### Configuration File (`config.toml`)
@@ -222,23 +412,65 @@ max_concurrent_jobs = 0     # 0 = auto-derive (1 for 24+ cores)
 
 [encoder_safety]
 disallow_hardware_encoding = true
+
+[scan]
+library_roots = ["/media/movies", "/media/tv"]
+stability_wait_secs = 10
+write_why_sidecars = true
+
+[paths]
+job_state_dir = "/var/lib/av1-daemon/jobs"
+temp_output_dir = "/var/lib/av1-daemon/temp"
+
+[gates]
+min_bytes = 1048576         # 1 MB minimum
+max_size_ratio = 0.95       # reject if output >= 95% of original
+keep_original = false       # delete backup after successful replacement
 ```
 
 ### Job State Machine
 
 ```mermaid
 stateDiagram-v2
-    [*] --> Queued
+    [*] --> Discovered: Scanner finds file
+    Discovered --> Stable: Stability check pass
+    Discovered --> Discovered: Unstable, retry next cycle
+    Stable --> Gated: Probe + gates pass
+    Stable --> Skipped: Gate fail
+    Gated --> Queued: Job created
     Queued --> Encoding: Executor picks up
     Encoding --> Validating: Av1an success
     Encoding --> Failed: Av1an error
-    Validating --> Replacing: Validation pass
+    Validating --> SizeGating: Validation pass
     Validating --> Failed: Validation fail
+    SizeGating --> Replacing: Size gate pass
+    SizeGating --> Skipped: Size gate fail
     Replacing --> Completed: Replace success
     Replacing --> Failed: Replace error
     Completed --> [*]
     Failed --> [*]
+    Skipped --> [*]
 ```
+
+### Job JSON Schema
+
+```json
+{
+  "id": "job-abc123",
+  "input_path": "/media/movies/film.mkv",
+  "output_path": "/var/lib/av1-daemon/temp/job-abc123.mkv",
+  "stage": "encoding",
+  "status": "running",
+  "source_type": "disc_like",
+  "probe_result": {
+    "video_streams": [{"codec_name": "hevc", "width": 1920, "height": 1080, "bitrate_kbps": 25000}],
+    "audio_streams": [{"codec_name": "truehd", "channels": 8}],
+    "format": {"duration_secs": 7200, "size_bytes": 22548578304}
+  },
+  "created_at": 1701388800000,
+  "updated_at": 1701392400000,
+  "error_reason": null
+}
 
 ### Metrics Snapshot (JSON)
 
@@ -349,6 +581,78 @@ stateDiagram-v2
 
 **Validates: Requirements 8.1, 8.2, 8.3, 8.4, 8.5, 8.6**
 
+### Property 9: Scanner Video Extension Filtering
+
+*For any* file path, the scanner SHALL include it as a candidate if and only if its extension (case-insensitive) is one of: `.mkv`, `.mp4`, `.avi`, `.mov`, `.m4v`, `.ts`, `.m2ts`.
+
+**Validates: Requirements 11.3**
+
+### Property 10: Scanner Hidden Directory Exclusion
+
+*For any* directory tree, the scanner SHALL never return files that are descendants of directories whose names start with `.` (hidden directories).
+
+**Validates: Requirements 11.2**
+
+### Property 11: Scanner Skip Marker Exclusion
+
+*For any* video file path, if a corresponding `.av1skip` marker file exists (same directory, `<filename>.av1skip`), the scanner SHALL exclude that file from candidates.
+
+**Validates: Requirements 11.4, 18.3, 18.4**
+
+### Property 12: Stability Check Size Comparison
+
+*For any* initial file size and current file size, the stability checker SHALL return `Stable` if and only if `initial_size == current_size`.
+
+**Validates: Requirements 12.2, 12.3, 12.4**
+
+### Property 13: Gate Rejection for No Video Streams
+
+*For any* probe result with zero video streams, the gate checker SHALL return `Skip` with reason containing "no video streams".
+
+**Validates: Requirements 13.3**
+
+### Property 14: Gate Rejection for Minimum Size
+
+*For any* file size below the configured `min_bytes` threshold, the gate checker SHALL return `Skip` with reason containing "below minimum size".
+
+**Validates: Requirements 13.4**
+
+### Property 15: Gate Rejection for Already AV1
+
+*For any* probe result where the first video stream has codec name containing "av1" (case-insensitive), the gate checker SHALL return `Skip` with reason containing "already AV1".
+
+**Validates: Requirements 13.5**
+
+### Property 16: Gate Pass for Valid Files
+
+*For any* probe result with at least one non-AV1 video stream, file size >= `min_bytes`, the gate checker SHALL return `Pass`.
+
+**Validates: Requirements 13.6**
+
+### Property 17: Job JSON Serialization Round-Trip
+
+*For any* valid `Job` struct, serializing to JSON and deserializing back SHALL produce an equivalent job with all fields preserved (id, paths, stage, status, source_type, probe_result, timestamps, error_reason).
+
+**Validates: Requirements 14.1, 14.2, 14.4**
+
+### Property 18: Source Classification Consistency
+
+*For any* path and probe result, the classifier SHALL return exactly one of `WebLike`, `DiscLike`, or `Unknown` - never multiple or none.
+
+**Validates: Requirements 15.1, 15.4**
+
+### Property 19: Size Gate Threshold
+
+*For any* original size, output size, and max_ratio, the size gate SHALL return `Reject` if and only if `output_size >= original_size * max_ratio`.
+
+**Validates: Requirements 16.1, 16.2, 16.4**
+
+### Property 20: Skip Marker Path Construction
+
+*For any* video file path `/dir/file.ext`, the skip marker path SHALL be `/dir/file.ext.av1skip`.
+
+**Validates: Requirements 18.4**
+
 ## Error Handling
 
 ### Startup Errors
@@ -359,6 +663,8 @@ stateDiagram-v2
 | FFmpeg < 8.0 | Abort with message: "FFmpeg 8.x required, got: {version}" |
 | Hardware flags detected | Abort with message: "Hardware encoding flag '{flag}' found in '{arg}', but hardware encoding is disabled" |
 | Config parse failure | Abort with message indicating TOML parse error |
+| Empty library_roots | Abort with message: "No library roots configured" |
+| Invalid max_size_ratio | Abort with message: "max_size_ratio must be in (0, 1]" |
 
 ### Runtime Errors
 
@@ -366,8 +672,12 @@ stateDiagram-v2
 |-----------------|----------|
 | Av1an process fails | Mark job as `Failed`, log error, continue with next job |
 | Validation fails | Mark job as `Failed`, preserve original file, log reason |
-| File replacement fails | Mark job as `Failed`, log error, preserve original |
+| File replacement fails | Mark job as `Failed`, log error, preserve original and temp files |
 | Metrics fetch fails (TUI) | Display stale data with "Connection lost" indicator |
+| Probe fails | Create `.av1skip` marker, optionally `.why.txt`, skip file |
+| Size gate fails | Mark job `Skipped`, create skip markers, delete temp output |
+| Stability check fails | Retry on next scan cycle |
+| Job state dir inaccessible | Log error, continue without persistence |
 
 ### Error Types
 
@@ -406,6 +716,30 @@ pub enum JobError {
     
     #[error("Replacement failed: {0}")]
     Replacement(#[from] std::io::Error),
+    
+    #[error("Size gate rejected: output {output_bytes} >= original {original_bytes} * {ratio}")]
+    SizeGateRejected { original_bytes: u64, output_bytes: u64, ratio: f32 },
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ProbeError {
+    #[error("ffprobe failed: {0}")]
+    FfprobeFailed(String),
+    
+    #[error("Failed to parse ffprobe output: {0}")]
+    ParseError(String),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ReplaceError {
+    #[error("Failed to create backup: {0}")]
+    BackupFailed(std::io::Error),
+    
+    #[error("Failed to copy encoded file: {0}")]
+    CopyFailed(std::io::Error),
+    
+    #[error("Failed to delete backup: {0}")]
+    DeleteBackupFailed(std::io::Error),
 }
 ```
 
@@ -427,6 +761,18 @@ Each correctness property will be implemented as a property-based test:
 6. **FFmpeg version parsing** - Generate version strings in various formats, verify parsing
 7. **MetricsSnapshot round-trip** - Generate random snapshots, verify JSON serialization round-trip
 8. **Config parsing/override** - Generate TOML configs and env vars, verify loading and override
+9. **Video extension filtering** - Generate random file paths, verify only video extensions pass
+10. **Hidden directory exclusion** - Generate directory trees with hidden dirs, verify exclusion
+11. **Skip marker exclusion** - Generate paths with/without markers, verify exclusion logic
+12. **Stability size comparison** - Generate size pairs, verify stable/unstable determination
+13. **Gate no video streams** - Generate probe results with 0 video streams, verify rejection
+14. **Gate minimum size** - Generate file sizes and thresholds, verify rejection logic
+15. **Gate already AV1** - Generate probe results with AV1 codec, verify rejection
+16. **Gate pass valid** - Generate valid probe results, verify acceptance
+17. **Job JSON round-trip** - Generate random jobs, verify serialization round-trip
+18. **Classification consistency** - Generate paths/probes, verify exactly one classification
+19. **Size gate threshold** - Generate size pairs and ratios, verify accept/reject logic
+20. **Skip marker path** - Generate video paths, verify marker path construction
 
 ### Unit Tests
 
@@ -434,12 +780,16 @@ Each correctness property will be implemented as a property-based test:
 - Job state machine transitions
 - Metrics aggregation logic
 - TUI widget rendering
+- Probe result parsing
+- Source classification heuristics
 
 ### Integration Tests
 
 - End-to-end encoding of small test files
 - Metrics server request/response cycle
 - TUI connection to daemon
+- Job persistence and recovery
+- Skip marker creation and detection
 
 ### Test Annotations
 

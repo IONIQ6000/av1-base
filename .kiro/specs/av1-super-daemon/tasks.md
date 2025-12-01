@@ -9,7 +9,7 @@
     - _Requirements: 1.1, 8.1_
   - [x] 1.2 Add dependencies to each crate
     - config: `serde`, `toml`
-    - daemon: `tokio`, `serde`, `serde_json`, `sysinfo`, `axum`, `num_cpus`, `thiserror`
+    - daemon: `tokio`, `serde`, `serde_json`, `sysinfo`, `axum`, `num_cpus`, `thiserror`, `walkdir`, `uuid`
     - tui: `ratatui`, `crossterm`, `serde`, `serde_json`, `tokio`, `reqwest`
     - Add `proptest` as dev-dependency for property testing
     - _Requirements: 7.1, 6.1_
@@ -29,6 +29,12 @@
   - [x] 2.4 Write property test for config parsing and env override
     - **Property 8: Configuration Parsing and Environment Override**
     - **Validates: Requirements 8.1, 8.2, 8.3, 8.4, 8.5, 8.6**
+
+- [x] 2.5 Extend configuration with scan, paths, and gates sections
+  - Add `ScanConfig` with library_roots, stability_wait_secs, write_why_sidecars
+  - Add `PathsConfig` with job_state_dir, temp_output_dir
+  - Add `GatesConfig` with min_bytes, max_size_ratio, keep_original
+  - _Requirements: 11.1, 12.1, 13.4, 16.2, 17.4, 17.5, 18.2_
 
 - [x] 3. Implement concurrency planning module
   - [x] 3.1 Create ConcurrencyPlan struct and derive_plan function
@@ -122,68 +128,223 @@
 - [x] 9. Checkpoint - Ensure all tests pass
   - Ensure all tests pass, ask the user if questions arise.
 
-- [x] 10. Implement job executor
-  - [x] 10.1 Create JobExecutor struct
+
+- [x] 10. Implement scanner module
+  - [x] 10.1 Create ScanCandidate struct and VIDEO_EXTENSIONS constant
+    - Define video extensions: .mkv, .mp4, .avi, .mov, .m4v, .ts, .m2ts
+    - _Requirements: 11.3, 11.5_
+  - [x] 10.2 Implement scan_libraries function
+    - Recursively walk each library_root using walkdir
+    - Skip hidden directories (names starting with .)
+    - Filter by video extensions (case-insensitive)
+    - Capture file size and modified time
+    - _Requirements: 11.1, 11.2, 11.3_
+  - [x] 10.3 Implement skip_marker_path and has_skip_marker functions
+    - Construct path as `<filename>.av1skip`
+    - Check if marker file exists
+    - _Requirements: 11.4, 18.4_
+  - [x] 10.4 Write property test for video extension filtering
+    - **Property 9: Scanner Video Extension Filtering**
+    - **Validates: Requirements 11.3**
+  - [x] 10.5 Write property test for hidden directory exclusion
+    - **Property 10: Scanner Hidden Directory Exclusion**
+    - **Validates: Requirements 11.2**
+  - [x] 10.6 Write property test for skip marker exclusion
+    - **Property 11: Scanner Skip Marker Exclusion**
+    - **Validates: Requirements 11.4, 18.3, 18.4**
+  - [x] 10.7 Write property test for skip marker path construction
+    - **Property 20: Skip Marker Path Construction**
+    - **Validates: Requirements 18.4**
+
+- [x] 11. Implement stability module
+  - [x] 11.1 Create StabilityResult enum
+    - Variants: Stable, Unstable { initial_size, current_size }
+    - _Requirements: 12.3, 12.4_
+  - [x] 11.2 Implement check_stability function
+    - Wait configurable duration (default 10 seconds)
+    - Compare current file size to initial size
+    - Return Stable if unchanged, Unstable otherwise
+    - _Requirements: 12.1, 12.2, 12.3, 12.4_
+  - [x] 11.3 Write property test for stability size comparison
+    - **Property 12: Stability Check Size Comparison**
+    - **Validates: Requirements 12.2, 12.3, 12.4**
+
+- [x] 12. Implement gates module
+  - [x] 12.1 Create ProbeResult, VideoStream, AudioStream, FormatInfo structs
+    - VideoStream: codec_name, width, height, bitrate_kbps
+    - FormatInfo: duration_secs, size_bytes
+    - _Requirements: 13.1_
+  - [x] 12.2 Implement probe_file function
+    - Run ffprobe with JSON output
+    - Parse streams and format info
+    - _Requirements: 13.1, 13.2_
+  - [x] 12.3 Implement check_gates function
+    - Check for no video streams -> skip
+    - Check file size < min_bytes -> skip
+    - Check first video stream is AV1 -> skip
+    - Return Pass with ProbeResult if all gates pass
+    - _Requirements: 13.3, 13.4, 13.5, 13.6_
+  - [x] 12.4 Write property test for gate rejection - no video streams
+    - **Property 13: Gate Rejection for No Video Streams**
+    - **Validates: Requirements 13.3**
+  - [x] 12.5 Write property test for gate rejection - minimum size
+    - **Property 14: Gate Rejection for Minimum Size**
+    - **Validates: Requirements 13.4**
+  - [x] 12.6 Write property test for gate rejection - already AV1
+    - **Property 15: Gate Rejection for Already AV1**
+    - **Validates: Requirements 13.5**
+  - [x] 12.7 Write property test for gate pass - valid files
+    - **Property 16: Gate Pass for Valid Files**
+    - **Validates: Requirements 13.6**
+
+- [x] 13. Implement classifier module
+  - [x] 13.1 Create SourceType enum
+    - Variants: WebLike, DiscLike, Unknown
+    - _Requirements: 15.1_
+  - [x] 13.2 Implement classify_source function
+    - Analyze path keywords for web/disc indicators
+    - Compare bitrate vs resolution ratio
+    - Return appropriate SourceType
+    - _Requirements: 15.1, 15.2, 15.3, 15.4_
+  - [x] 13.3 Write property test for classification consistency
+    - **Property 18: Source Classification Consistency**
+    - **Validates: Requirements 15.1, 15.4**
+
+- [x] 14. Checkpoint - Ensure all tests pass
+  - Ensure all tests pass, ask the user if questions arise.
+
+- [x] 15. Implement job manager module
+  - [x] 15.1 Create Job struct and JobStage/JobStatus enums
+    - Job: id, input_path, output_path, stage, status, source_type, probe_result, timestamps, error_reason
+    - JobStage: Queued, Encoding, Validating, SizeGating, Replacing, Complete
+    - JobStatus: Pending, Running, Success, Failed, Skipped
+    - _Requirements: 14.1_
+  - [x] 15.2 Implement create_job function
+    - Generate UUID for job id
+    - Set initial stage to Queued, status to Pending
+    - Store probe_result and source_type
+    - _Requirements: 14.1_
+  - [x] 15.3 Implement save_job and load_jobs functions
+    - Serialize job to JSON file in job_state_dir
+    - Load all job JSON files on startup
+    - _Requirements: 14.1, 14.2, 14.3, 14.4_
+  - [x] 15.4 Implement job_exists_for_path function
+    - Check if any pending/running job exists for given path
+    - _Requirements: 14.3_
+  - [x] 15.5 Write property test for job JSON round-trip
+    - **Property 17: Job JSON Serialization Round-Trip**
+    - **Validates: Requirements 14.1, 14.2, 14.4**
+
+- [x] 16. Implement size gate module
+  - [x] 16.1 Create SizeGateResult enum
+    - Variants: Accept, Reject { original_bytes, output_bytes, ratio }
+    - _Requirements: 16.1_
+  - [x] 16.2 Implement check_size_gate function
+    - Compare output_size to original_size * max_ratio
+    - Return Reject if output >= threshold, Accept otherwise
+    - _Requirements: 16.1, 16.2, 16.4_
+  - [x] 16.3 Write property test for size gate threshold
+    - **Property 19: Size Gate Threshold**
+    - **Validates: Requirements 16.1, 16.2, 16.4**
+
+- [x] 17. Implement skip marker module
+  - [x] 17.1 Implement write_skip_marker function
+    - Create empty .av1skip file adjacent to video
+    - _Requirements: 18.1_
+  - [x] 17.2 Implement write_why_sidecar function
+    - Create .why.txt file with skip reason
+    - Only write if write_why_sidecars is enabled
+    - _Requirements: 18.2_
+
+- [x] 18. Implement replacer module
+  - [x] 18.1 Implement backup_path function
+    - Generate path as <name>.orig.<timestamp>
+    - _Requirements: 17.1_
+  - [x] 18.2 Implement atomic_replace function
+    - Create backup of original file
+    - Copy encoded file to original location
+    - Delete backup if keep_original is false
+    - Handle errors and preserve files on failure
+    - _Requirements: 17.1, 17.2, 17.3, 17.4, 17.5, 17.6_
+
+- [x] 19. Checkpoint - Ensure all tests pass
+  - Ensure all tests pass, ask the user if questions arise.
+
+
+- [x] 20. Implement job executor (existing, update for new pipeline)
+  - [x] 20.1 Create JobExecutor struct
     - Use tokio Semaphore for concurrency limiting
     - Store concurrency plan and shared metrics
     - _Requirements: 5.5_
-  - [x] 10.2 Implement job execution pipeline
+  - [x] 20.2 Update job execution pipeline for full flow
     - Create temp chunks directory
     - Call run_av1an with params
-    - Update job metrics during execution
-    - Handle success/failure state transitions
-    - _Requirements: 5.1, 5.2, 5.3, 5.4_
-  - [x] 10.3 Write unit tests for job executor
+    - Run validation after encode
+    - Run size gate check
+    - Call atomic_replace on success
+    - Create skip markers on size gate failure
+    - Update job state at each stage
+    - _Requirements: 5.1, 5.2, 5.3, 5.4, 16.3, 17.1-17.6_
+  - [x] 20.3 Write unit tests for job executor
     - Test semaphore permit limiting
     - Test state transitions
     - _Requirements: 5.5_
 
-- [x] 11. Implement daemon startup and main loop
-  - [x] 11.1 Create daemon entry point
+- [x] 21. Implement daemon startup and main loop (existing, update for scanning)
+  - [x] 21.1 Create daemon entry point
     - Load config from file
     - Apply environment overrides
     - Run startup checks in order: software-only, av1an, ffmpeg
     - Derive concurrency plan
     - Initialize shared metrics
     - _Requirements: 4.1, 4.3, 3.1_
-  - [x] 11.2 Start metrics server
+  - [x] 21.2 Create required directories
+    - Create job_state_dir if not exists
+    - Create temp_output_dir if not exists
+    - _Requirements: 14.1_
+  - [x] 21.3 Start metrics server
     - Spawn HTTP server task
     - _Requirements: 7.1_
-  - [x] 11.3 Implement daemon loop
-    - Process jobs from queue
+  - [x] 21.4 Implement scan cycle in daemon loop
+    - Load existing jobs to avoid duplicates
+    - Scan all library_roots
+    - For each candidate: stability check, probe, gates, classify, create job
+    - Queue jobs for execution
+    - _Requirements: 11.1, 12.1-12.4, 13.1-13.6, 14.3, 15.1-15.5_
+  - [x] 21.5 Process jobs from queue
     - Update metrics on job completion
     - _Requirements: 5.2, 5.3, 5.4_
 
-- [x] 12. Implement TUI dashboard
-  - [x] 12.1 Create TUI app structure
+- [x] 22. Implement TUI dashboard
+  - [x] 22.1 Create TUI app structure
     - Initialize terminal with crossterm
     - Create App struct with metrics state
     - _Requirements: 6.1_
-  - [x] 12.2 Implement metrics fetching
+  - [x] 22.2 Implement metrics fetching
     - HTTP GET to http://127.0.0.1:7878/metrics
     - Deserialize MetricsSnapshot
     - Poll every ~500ms
     - _Requirements: 6.1, 6.7_
-  - [x] 12.3 Implement queue table widget
+  - [x] 22.3 Implement queue table widget
     - Display columns: ID, Stage, Progress %, FPS, Bitrate, CRF, Workers, ETA
     - _Requirements: 6.2_
-  - [x] 12.4 Implement system gauges widget
+  - [x] 22.4 Implement system gauges widget
     - Display CPU and memory usage gauges
     - Display load averages table
     - _Requirements: 6.3, 6.4_
-  - [x] 12.5 Implement throughput chart widget
+  - [x] 22.5 Implement throughput chart widget
     - Display MB encoded over time
     - _Requirements: 6.5_
-  - [x] 12.6 Implement event log widget
+  - [x] 22.6 Implement event log widget
     - Display recent job events
     - _Requirements: 6.6_
-  - [x] 12.7 Wire up TUI main loop
+  - [x] 22.7 Wire up TUI main loop
     - Handle keyboard input (quit on 'q')
     - Render all widgets in layout
     - _Requirements: 6.1_
 
-- [x] 13. Create FFmpeg installer script
-  - [x] 13.1 Create scripts/install_ffmpeg8.sh
+- [x] 23. Create FFmpeg installer script
+  - [x] 23.1 Create scripts/install_ffmpeg8.sh
     - Check for root privileges
     - Remove existing distro FFmpeg
     - Download from FFMPEG_ARCHIVE_URL
@@ -191,11 +352,11 @@
     - Display installed version
     - _Requirements: 9.1, 9.2, 9.3, 9.4, 9.5, 9.6_
 
-- [x] 14. Create CLI entry point
-  - [x] 14.1 Create cli-daemon crate
+- [x] 24. Create CLI entry point
+  - [x] 24.1 Create cli-daemon crate
     - Parse command line arguments (--config path)
     - Call daemon startup
     - _Requirements: 8.1_
 
-- [x] 15. Final Checkpoint - Ensure all tests pass
+- [x] 25. Final Checkpoint - Ensure all tests pass
   - Ensure all tests pass, ask the user if questions arise.

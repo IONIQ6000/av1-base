@@ -12,8 +12,11 @@ sysinfo = "0.31"
 axum = "0.7"
 num_cpus = "1.16"
 thiserror = "1.0"
+walkdir = "2.5"
+uuid = { version = "1.10", features = ["v4"] }
 
 [dev-dependencies]
 proptest = "1.4"
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
+tempfile = "3.10"

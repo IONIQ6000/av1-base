@@ -97,7 +97,7 @@ pub fn derive_plan(cfg: &Config) -> ConcurrencyPlan {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{Av1anConfig, CpuConfig, EncoderSafetyConfig};
+    use crate::config::{Av1anConfig, CpuConfig, EncoderSafetyConfig, GatesConfig, PathsConfig, ScanConfig};
     use proptest::prelude::*;
 
     // **Feature: av1-super-daemon, Property 1: Concurrency Plan Derivation**
@@ -124,6 +124,9 @@ mod tests {
                     max_concurrent_jobs: 0,  // auto-derive
                 },
                 encoder_safety: EncoderSafetyConfig::default(),
+                paths: PathsConfig::default(),
+                scan: ScanConfig::default(),
+                gates: GatesConfig::default(),
             };
 
             let plan = derive_plan(&cfg);
@@ -173,6 +176,9 @@ mod tests {
                     max_concurrent_jobs: explicit_jobs,
                 },
                 encoder_safety: EncoderSafetyConfig::default(),
+                paths: PathsConfig::default(),
+                scan: ScanConfig::default(),
+                gates: GatesConfig::default(),
             };
 
             let plan = derive_plan(&cfg);
@@ -211,6 +217,9 @@ mod tests {
                 },
                 av1an: Av1anConfig::default(),
                 encoder_safety: EncoderSafetyConfig::default(),
+                paths: PathsConfig::default(),
+                scan: ScanConfig::default(),
+                gates: GatesConfig::default(),
             };
 
             let plan = derive_plan(&cfg);

@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc bd16c216de36fc5aef3f71019e20205af6afeaa2e57bbfebba84d7cfd09178f9 # shrinks to base_path = "Nf", disc_keyword = "bluray", probe = ProbeResult { video_streams: [], audio_streams: [], format: FormatInfo { duration_secs: 3600.0, size_bytes: 5000000000 } }

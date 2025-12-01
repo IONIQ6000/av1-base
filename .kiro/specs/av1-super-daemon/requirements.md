@@ -2,7 +2,7 @@
 
 ## Introduction
 
-The AV1 Super Daemon is a Rust-based system that automates media encoding workflows using AV1 compression with film-grain tuning. The system consists of a daemon that scans, gates, encodes, validates, and replaces media files using Av1an (built from source) with SVT-AV1 encoder. It enforces software-only encoding (no GPU/hardware acceleration), requires FFmpeg 8+, and provides a rich TUI dashboard built with Ratatui for real-time monitoring of encoding jobs, system metrics, and throughput.
+The AV1 Super Daemon is a Rust-based system that automates media encoding workflows using AV1 compression with film-grain tuning. The system consists of a daemon that scans library directories, gates candidates, encodes media files using Av1an (built from source) with SVT-AV1 encoder, validates output, and atomically replaces originals. It enforces software-only encoding (no GPU/hardware acceleration), requires FFmpeg 8+, persists job state as JSON, uses skip markers to prevent reprocessing, and provides a rich TUI dashboard built with Ratatui for real-time monitoring of encoding jobs, system metrics, and throughput.
 
 ## Glossary
 
@@ -18,6 +18,14 @@ The AV1 Super Daemon is a Rust-based system that automates media encoding workfl
 - **PSNR**: Peak Signal-to-Noise Ratio, an objective video quality metric
 - **SSIM**: Structural Similarity Index, an image/video quality metric
 - **Concurrency Plan**: Configuration determining worker count and concurrent job limits based on CPU cores
+- **Library Root**: A configured directory path that the daemon recursively scans for video files
+- **Skip Marker**: A `.av1skip` sidecar file indicating a video should not be processed
+- **Why Sidecar**: A `.why.txt` file explaining why a file was skipped
+- **Stability Check**: Verification that a file's size remains unchanged over a time window before processing
+- **Size Gate**: Post-encode validation ensuring output is smaller than original by a configured ratio
+- **Job State Directory**: Directory where job JSON files are persisted for recovery and TUI consumption
+- **Atomic Replacement**: Safe file swap with backup creation before overwriting original
+- **Source Classification**: Categorization of video as WebLike or DiscLike based on path/codec/bitrate heuristics
 
 ## Requirements
 
@@ -150,3 +158,97 @@ The AV1 Super Daemon is a Rust-based system that automates media encoding workfl
 9. WHEN building an Av1an command THEN the Command Builder SHALL include `--audio-copy`
 10. WHEN building an Av1an command THEN the Command Builder SHALL include `--workers` with the value from the concurrency plan
 11. WHEN building an Av1an command THEN the Command Builder SHALL include `--temp` with the temporary chunks directory path
+
+### Requirement 11
+
+**User Story:** As a system administrator, I want the daemon to scan configured library directories for video files, so that new media is automatically discovered and queued for encoding.
+
+#### Acceptance Criteria
+
+1. WHEN the daemon runs a scan cycle THEN the Scanner SHALL recursively walk each configured `library_root` directory
+2. WHEN the Scanner encounters a hidden directory (name starting with `.`) THEN the Scanner SHALL skip that directory and its contents
+3. WHEN the Scanner encounters a file THEN the Scanner SHALL consider only video extensions: `.mkv`, `.mp4`, `.avi`, `.mov`, `.m4v`, `.ts`, `.m2ts`
+4. WHEN the Scanner encounters a file with a corresponding `.av1skip` marker THEN the Scanner SHALL skip that file
+5. WHEN the Scanner discovers a candidate file THEN the Scanner SHALL capture the file size and modified time for stability checking
+
+### Requirement 12
+
+**User Story:** As a media engineer, I want the daemon to verify file stability before processing, so that files still being written or transferred are not corrupted by premature encoding.
+
+#### Acceptance Criteria
+
+1. WHEN a candidate file is discovered THEN the Stability Checker SHALL wait a configurable duration (default 10 seconds)
+2. WHEN the stability wait completes THEN the Stability Checker SHALL compare the current file size to the initially captured size
+3. WHEN the file size has changed during the stability window THEN the Stability Checker SHALL mark the file as unstable and retry on the next scan cycle
+4. WHEN the file size remains unchanged THEN the Stability Checker SHALL mark the file as stable and allow processing to continue
+
+### Requirement 13
+
+**User Story:** As a media engineer, I want the daemon to gate files based on probe results, so that unsuitable files are skipped with clear explanations.
+
+#### Acceptance Criteria
+
+1. WHEN a stable file is ready for gating THEN the Gate Checker SHALL run `ffprobe` to collect stream and format metadata
+2. WHEN `ffprobe` fails on a file THEN the Gate Checker SHALL create a `.av1skip` marker and optionally a `.why.txt` sidecar explaining the probe failure
+3. WHEN a file has no video streams THEN the Gate Checker SHALL skip the file and create skip markers with reason "no video streams"
+4. WHEN a file is smaller than the configured `min_bytes` threshold THEN the Gate Checker SHALL skip the file with reason "below minimum size"
+5. WHEN the first video stream is already AV1 codec THEN the Gate Checker SHALL skip the file with reason "already AV1"
+6. WHEN a file passes all gates THEN the Gate Checker SHALL allow the file to proceed to job creation
+
+### Requirement 14
+
+**User Story:** As a system operator, I want job state persisted as JSON files, so that the TUI can display live status and jobs can survive daemon restarts.
+
+#### Acceptance Criteria
+
+1. WHEN a job is created THEN the Job Manager SHALL persist a JSON file in the configured `job_state_dir` with job metadata
+2. WHEN a job state changes (stage, progress, status) THEN the Job Manager SHALL update the corresponding JSON file
+3. WHEN the daemon starts THEN the Job Manager SHALL load existing job JSON files to avoid duplicate work on in-flight items
+4. WHEN a job completes or fails THEN the Job Manager SHALL update the JSON file with final status and reason
+
+### Requirement 15
+
+**User Story:** As a media engineer, I want the daemon to classify source files, so that encoding parameters can be adjusted for web-sourced vs disc-sourced content.
+
+#### Acceptance Criteria
+
+1. WHEN a file passes gates THEN the Classifier SHALL analyze path keywords, bitrate vs resolution ratio, and codec to determine source type
+2. WHEN path contains web-related keywords or bitrate is low relative to resolution THEN the Classifier SHALL label the source as WebLike
+3. WHEN path contains disc-related keywords or bitrate is high relative to resolution THEN the Classifier SHALL label the source as DiscLike
+4. WHEN classification cannot be determined THEN the Classifier SHALL label the source as Unknown
+5. WHEN a source is classified THEN the Job SHALL store the `is_web_like` flag for later use
+
+### Requirement 16
+
+**User Story:** As a media engineer, I want post-encode size validation, so that encodes that grow larger than the original are rejected.
+
+#### Acceptance Criteria
+
+1. WHEN encoding completes successfully THEN the Size Gate SHALL compare output file size to original file size
+2. WHEN output size is greater than or equal to `original_size * max_size_ratio` THEN the Size Gate SHALL reject the encode
+3. WHEN the Size Gate rejects an encode THEN the Daemon SHALL delete the temp output, create `.av1skip` marker, and optionally create `.why.txt` with reason
+4. WHEN the Size Gate accepts an encode THEN the Daemon SHALL proceed to file replacement
+
+### Requirement 17
+
+**User Story:** As a system administrator, I want atomic file replacement with backup, so that original files are protected during the swap process.
+
+#### Acceptance Criteria
+
+1. WHEN replacement begins THEN the Replacer SHALL create a backup of the original file as `<name>.orig.<timestamp>`
+2. WHEN backup creation fails THEN the Replacer SHALL abort replacement and preserve both original and encoded files
+3. WHEN backup succeeds THEN the Replacer SHALL copy the encoded file to the original location
+4. WHEN copy succeeds and `keep_original` is false THEN the Replacer SHALL delete the backup file
+5. WHEN copy succeeds and `keep_original` is true THEN the Replacer SHALL preserve the backup file
+6. WHEN any replacement step fails THEN the Replacer SHALL preserve temp files for manual inspection and mark job as failed
+
+### Requirement 18
+
+**User Story:** As a developer, I want skip markers and why sidecars, so that skipped files are documented and not reprocessed.
+
+#### Acceptance Criteria
+
+1. WHEN a file is skipped for any reason THEN the Skip Marker Writer SHALL create a `.av1skip` file adjacent to the original
+2. WHEN `write_why_sidecars` is enabled THEN the Skip Marker Writer SHALL create a `.why.txt` file with the skip reason
+3. WHEN a `.av1skip` marker exists for a file THEN the Scanner SHALL not queue that file for processing
+4. WHEN checking for skip markers THEN the Daemon SHALL look for `<filename>.av1skip` in the same directory
