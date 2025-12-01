@@ -10,13 +10,14 @@ IMAGE="masterofzen/av1an:master"
 
 # For simple commands like -version, run without mounts
 if [[ $# -eq 0 ]] || [[ "$1" == "-version" ]] || [[ "$1" == "-help" ]] || [[ "$1" == "-h" ]]; then
-    exec docker run --rm --privileged "${IMAGE}" ffmpeg "$@"
+    exec docker run --rm --privileged --entrypoint ffmpeg "${IMAGE}" "$@"
 fi
 
 # For actual encoding, mount current directory
 exec docker run --rm \
     --privileged \
+    --entrypoint ffmpeg \
     -v "$(pwd):$(pwd)" \
     -w "$(pwd)" \
     "${IMAGE}" \
-    ffmpeg "$@"
+    "$@"
