@@ -15,65 +15,52 @@ if [[ $# -eq 0 ]] || [[ "$1" == "--version" ]] || [[ "$1" == "--help" ]] || [[ "
     exec docker run --rm --privileged "${IMAGE}" "$@"
 fi
 
-# Parse arguments to find -i, -o, and --temp paths that need mounting
-AV1AN_ARGS=()
-MOUNTS=()
-
-# Track directories we need to mount
+# Track top-level directories we need to mount
 declare -A MOUNT_DIRS
 
-add_mount_dir() {
+add_path() {
     local path="$1"
-    local dir
     
-    # Get absolute path
-    if [[ "${path}" == /* ]]; then
-        dir=$(dirname "${path}")
-    else
-        dir=$(dirname "$(pwd)/${path}")
+    # Make absolute if relative
+    if [[ "${path}" != /* ]]; then
+        path="$(pwd)/${path}"
     fi
     
-    # Normalize and add to mount set
-    dir=$(realpath -m "${dir}" 2>/dev/null || echo "${dir}")
-    MOUNT_DIRS["${dir}"]=1
+    # Extract top-level directory (e.g., /main-library-2 from /main-library-2/Media/...)
+    local top_dir="/$(echo "$path" | cut -d'/' -f2)"
+    
+    if [[ -n "$top_dir" ]] && [[ "$top_dir" != "/" ]] && [[ -d "$top_dir" ]]; then
+        MOUNT_DIRS["$top_dir"]=1
+    fi
 }
 
-# Process arguments
+# Parse arguments to find -i, -o, and --temp paths that need mounting
+AV1AN_ARGS=()
+
 i=1
 while [[ $i -le $# ]]; do
     arg="${!i}"
     
     case "${arg}" in
         -i|--input)
-            # Next arg is input path
             ((i++))
             if [[ $i -le $# ]]; then
-                input_path="${!i}"
-                add_mount_dir "${input_path}"
-                AV1AN_ARGS+=("${arg}" "${input_path}")
+                add_path "${!i}"
+                AV1AN_ARGS+=("${arg}" "${!i}")
             fi
             ;;
         -o|--output)
-            # Next arg is output path
             ((i++))
             if [[ $i -le $# ]]; then
-                output_path="${!i}"
-                add_mount_dir "${output_path}"
-                AV1AN_ARGS+=("${arg}" "${output_path}")
+                add_path "${!i}"
+                AV1AN_ARGS+=("${arg}" "${!i}")
             fi
             ;;
         --temp)
-            # Next arg is temp directory
             ((i++))
             if [[ $i -le $# ]]; then
-                temp_path="${!i}"
-                # For temp, mount the directory itself
-                if [[ "${temp_path}" == /* ]]; then
-                    MOUNT_DIRS["${temp_path}"]=1
-                else
-                    MOUNT_DIRS["$(pwd)/${temp_path}"]=1
-                fi
-                AV1AN_ARGS+=("${arg}" "${temp_path}")
+                add_path "${!i}"
+                AV1AN_ARGS+=("${arg}" "${!i}")
             fi
             ;;
         *)
@@ -83,19 +70,21 @@ while [[ $i -le $# ]]; do
     ((i++))
 done
 
-# Build mount arguments - mount each unique directory
+# Build mount arguments
+MOUNTS=()
 for dir in "${!MOUNT_DIRS[@]}"; do
-    # Create directory if it doesn't exist (for temp/output dirs)
     mkdir -p "${dir}" 2>/dev/null || true
     MOUNTS+=("-v" "${dir}:${dir}")
 done
 
-# Also mount current working directory for relative paths
-MOUNTS+=("-v" "$(pwd):$(pwd)")
+# Also mount current working directory's top-level
+cwd_top="/$(pwd | cut -d'/' -f2)"
+if [[ -n "$cwd_top" ]] && [[ "$cwd_top" != "/" ]] && [[ -d "$cwd_top" ]]; then
+    MOUNT_DIRS["$cwd_top"]=1
+    MOUNTS+=("-v" "${cwd_top}:${cwd_top}")
+fi
 
 # Run av1an in Docker
-# --privileged: required for Docker-in-LXC (nested containers)
-# --user 0:0: run as root to access files with restricted permissions
 exec docker run --rm \
     --privileged \
     --user 0:0 \
