@@ -10,7 +10,8 @@ use thiserror::Error;
 
 /// Fixed SVT-AV1 parameters for film-grain tuning
 /// Includes CRF, preset, and film-grain settings for the encoder
-const SVT_PARAMS: &str = "--crf 8 --preset 3 --tune 3 --film-grain 20 --enable-qm 1 --qm-min 1 --qm-max 15 --keyint 240 --lookahead 40";
+/// tune: 0=VQ, 1=PSNR, 2=SSIM (no tune 3 in newer SVT-AV1)
+const SVT_PARAMS: &str = "--crf 8 --preset 3 --film-grain 20 --enable-qm 1 --qm-min 1 --qm-max 15 --keyint 240 --lookahead 40";
 
 /// Error type for encoding operations
 #[derive(Debug, Error)]
