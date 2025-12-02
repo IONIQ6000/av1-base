@@ -13,22 +13,16 @@ if [[ $# -eq 0 ]] || [[ "$1" == "-version" ]] || [[ "$1" == "-help" ]] || [[ "$1
     exec docker run --rm --privileged --entrypoint ffprobe "${IMAGE}" "$@"
 fi
 
-# For probing files, we need to mount the file's directory
-# Find any file paths in arguments and mount their parent directories
+# For probing files, mount the top-level directory of any file paths
 declare -A MOUNT_DIRS
 ARGS=()
 
 for arg in "$@"; do
-    if [[ -e "$arg" ]] || [[ "$arg" == /* ]]; then
-        # This looks like a file path - mount its parent directory
-        if [[ "$arg" == /* ]]; then
-            dir=$(dirname "$arg")
-        else
-            dir=$(dirname "$(pwd)/$arg")
-        fi
-        # Skip root directory
-        if [[ "$dir" != "/" ]]; then
-            MOUNT_DIRS["$dir"]=1
+    if [[ "$arg" == /* ]]; then
+        # Extract top-level directory (e.g., /main-library-2 from /main-library-2/Media/...)
+        top_dir="/$(echo "$arg" | cut -d'/' -f2)"
+        if [[ -d "$top_dir" ]]; then
+            MOUNT_DIRS["$top_dir"]=1
         fi
     fi
     ARGS+=("$arg")
@@ -37,29 +31,12 @@ done
 # Build mount arguments
 MOUNTS=()
 for dir in "${!MOUNT_DIRS[@]}"; do
-    MOUNTS+=("-v" "${dir}:${dir}:ro")
-done
-
-# Mount the top-level directory for files at root
-# e.g., /main-library-2 for /main-library-2/Media/...
-for arg in "$@"; do
-    if [[ "$arg" == /* ]]; then
-        top_dir=$(echo "$arg" | cut -d'/' -f2)
-        if [[ -n "$top_dir" ]] && [[ -d "/$top_dir" ]]; then
-            MOUNT_DIRS["/$top_dir"]=1
-        fi
-    fi
-done
-
-# Rebuild mounts with top-level dirs
-MOUNTS=()
-for dir in "${!MOUNT_DIRS[@]}"; do
-    MOUNTS+=("-v" "${dir}:${dir}:ro")
+    MOUNTS+=("-v" "${dir}:${dir}")
 done
 
 # Also mount current working directory if not root
 if [[ "$(pwd)" != "/" ]]; then
-    MOUNTS+=("-v" "$(pwd):$(pwd):ro")
+    MOUNTS+=("-v" "$(pwd):$(pwd)")
 fi
 
 exec docker run --rm \
