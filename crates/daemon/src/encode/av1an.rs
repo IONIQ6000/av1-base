@@ -9,7 +9,8 @@ use std::process::Command;
 use thiserror::Error;
 
 /// Fixed SVT-AV1 parameters for film-grain tuning
-const SVT_PARAMS: &str = "tune=grain:film-grain=20:enable-qm=1:qm-min=1:qm-max=15:keyint=240:lookahead=40";
+/// Includes CRF, preset, and film-grain settings for the encoder
+const SVT_PARAMS: &str = "--crf 8 --preset 3 --tune 3 --film-grain 20 --enable-qm 1 --qm-min 1 --qm-max 15 --keyint 240 --lookahead 40";
 
 /// Error type for encoding operations
 #[derive(Debug, Error)]
@@ -87,18 +88,12 @@ pub fn build_av1an_command(params: &Av1anEncodeParams) -> Command {
     // Pixel format (Requirements 2.2, 10.4)
     cmd.arg("--pix-format").arg("yuv420p10le");
 
-    // Quality settings (Requirements 2.3, 2.4, 10.5, 10.6)
-    cmd.arg("--crf").arg("8");
-    cmd.arg("--preset").arg("3");
+    // Video encoder parameters including CRF, preset, and film-grain tuning
+    // (Requirements 2.3, 2.4, 2.5, 10.5, 10.6, 10.7)
+    cmd.arg("--video-params").arg(SVT_PARAMS);
 
-    // SVT parameters for film-grain tuning (Requirements 2.5, 10.7)
-    cmd.arg("--svt-params").arg(SVT_PARAMS);
-
-    // Target quality (Requirements 2.6, 10.8)
-    cmd.arg("--target-quality").arg("1");
-
-    // Audio handling (Requirements 2.7, 10.9)
-    cmd.arg("--audio-copy");
+    // Audio handling - copy all audio streams (Requirements 2.7, 10.9)
+    cmd.arg("--audio-params").arg("-c:a copy");
 
     // Worker count from concurrency plan (Requirements 10.10)
     cmd.arg("--workers")
