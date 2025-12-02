@@ -95,8 +95,10 @@ MOUNTS+=("-v" "$(pwd):$(pwd)")
 
 # Run av1an in Docker
 # --privileged: required for Docker-in-LXC (nested containers)
+# --user 0:0: run as root to access files with restricted permissions
 exec docker run --rm \
     --privileged \
+    --user 0:0 \
     "${MOUNTS[@]}" \
     -w "$(pwd)" \
     "${IMAGE}" \

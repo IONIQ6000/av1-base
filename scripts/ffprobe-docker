@@ -41,6 +41,7 @@ fi
 
 exec docker run --rm \
     --privileged \
+    --user 0:0 \
     --entrypoint ffprobe \
     "${MOUNTS[@]}" \
     -w "$(pwd)" \
